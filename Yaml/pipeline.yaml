@@ -1,0 +1,331 @@
+trigger: none
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  TenantId: 'e4d98dd2-9199-42e5-ba8b-da3e763ede2e'
+  ClientId: 'dd3aa383-4d69-4854-8885-9e483ffb5b72'
+  ClientSecret: '82H8Q~TuZnTU9XRytWpK46g.YP_QoTTUww-NWday'
+  ProjectName: 'Sales Dashboard'
+  BaseFolder: '$(Build.SourcesDirectory)\Sales'
+  
+  # 🎯 TARGET ENVIRONMENT CONTROL VARIABLE
+  # Set this variable when triggering the pipeline to control deployment target
+  # Options: 'DEV', 'UAT', 'PROD'
+  # Default: 'DEV' (if not specified)
+  TargetEnvironment: 'DEV'
+  
+  # Environment Configuration
+  DevWorkspaceId: 'b42dfb7f-667e-48f9-97c9-12198c700e09'
+  DevWorkspaceName: 'VISACICDDev'
+  DevSharePointUrl: 'https://testmaq.sharepoint.com/sites/VisaTest/Shared%20Documents/Dev/SalesDashboard.xlsx'
+  DevGatewayId: 'fabd7e5d-1737-4c50-88c0-7ec4874f99e5'
+  
+  UatWorkspaceId: '436d60a0-3a50-480d-b7e5-f7a9d3cd5fb5'
+  UatWorkspaceName: 'VISACICDQA'
+  UatSharePointUrl: 'https://testmaq.sharepoint.com/sites/VisaTest/Shared%20Documents/Uat/SalesDashboard.xlsx'
+  UatGatewayId: 'd91d80d8-19e2-4959-af4b-74d40bde50d8'
+  
+  ProdWorkspaceId: 'cb0a4bb8-e16a-4886-b803-4dcceda22cd0'
+  ProdWorkspaceName: 'VISACICDProd'
+  ProdSharePointUrl: 'https://testmaq.sharepoint.com/sites/VisaTest/Shared%20Documents/Prod/SalesDashboard.xlsx '
+  ProdGatewayId: 'fc18f7e5-c9c2-4aa7-98db-ba8512248936'
+
+steps:
+  - task: PowerShell@2
+    displayName: '🎯 Environment Selection & Deployment'
+    inputs:
+      targetType: 'inline'
+      pwsh: true
+      script: |
+        $ErrorActionPreference = "Stop"
+
+        # ===== VARIABLE-BASED ENVIRONMENT SELECTION =====
+        $TargetEnvironment = "$(TargetEnvironment)"
+        
+        # Handle empty or null values
+        if ([string]::IsNullOrWhiteSpace($TargetEnvironment)) {
+            $TargetEnvironment = "DEV"
+            Write-Host "⚠️ No TargetEnvironment specified, defaulting to DEV"
+        }
+        
+        Write-Host "🎯 VARIABLE-CONTROLLED DEPLOYMENT" -ForegroundColor Cyan
+        Write-Host "📋 Target Environment Variable: '$TargetEnvironment'" -ForegroundColor White
+        
+        # Environment-specific configuration
+        switch ($TargetEnvironment.ToUpper().Trim()) {
+            "DEV" {
+                $EnvironmentType = "DEVELOPMENT"
+                $WorkspaceId = "$(DevWorkspaceId)"
+                $WorkspaceName = "$(DevWorkspaceName)"
+                $TargetSharePointUrl = "$(DevSharePointUrl)"
+                $TargetGatewayId = "$(DevGatewayId)"
+                $DisplayColor = "Green"
+                Write-Host "🧪 DEVELOPMENT Environment Selected" -ForegroundColor $DisplayColor
+            }
+            "UAT" {
+                $EnvironmentType = "UAT"
+                $WorkspaceId = "$(UatWorkspaceId)"
+                $WorkspaceName = "$(UatWorkspaceName)"
+                $TargetSharePointUrl = "$(UatSharePointUrl)"
+                $TargetGatewayId = "$(UatGatewayId)"
+                $DisplayColor = "Yellow"
+                Write-Host "🧪 UAT Environment Selected" -ForegroundColor $DisplayColor
+            }
+            "PROD" {
+                $EnvironmentType = "PRODUCTION"
+                $WorkspaceId = "$(ProdWorkspaceId)"
+                $WorkspaceName = "$(ProdWorkspaceName)"
+                $TargetSharePointUrl = "$(ProdSharePointUrl)"
+                $TargetGatewayId = "$(ProdGatewayId)"
+                $DisplayColor = "Red"
+                Write-Host "🏭 PRODUCTION Environment Selected" -ForegroundColor $DisplayColor
+                
+                # Extra confirmation for production
+                Write-Host ""
+                Write-Host "⚠️  WARNING: DEPLOYING TO PRODUCTION ENVIRONMENT!" -ForegroundColor Red
+                Write-Host "🔴 Workspace: $WorkspaceName" -ForegroundColor Red
+                Write-Host "🔴 This will affect live production data!" -ForegroundColor Red
+                Write-Host ""
+            }
+            "DEVELOPMENT" {
+                # Allow full name as well
+                $EnvironmentType = "DEVELOPMENT"
+                $WorkspaceId = "$(DevWorkspaceId)"
+                $WorkspaceName = "$(DevWorkspaceName)"
+                $TargetSharePointUrl = "$(DevSharePointUrl)"
+                $TargetGatewayId = "$(DevGatewayId)"
+                $DisplayColor = "Green"
+                Write-Host "🧪 DEVELOPMENT Environment Selected (full name used)" -ForegroundColor $DisplayColor
+            }
+            "PRODUCTION" {
+                # Allow full name as well
+                $EnvironmentType = "PRODUCTION"
+                $WorkspaceId = "$(ProdWorkspaceId)"
+                $WorkspaceName = "$(ProdWorkspaceName)"
+                $TargetSharePointUrl = "$(ProdSharePointUrl)"
+                $TargetGatewayId = "$(ProdGatewayId)"
+                $DisplayColor = "Red"
+                Write-Host "🏭 PRODUCTION Environment Selected (full name used)" -ForegroundColor $DisplayColor
+            }
+            default {
+                Write-Host ""
+                Write-Error "❌ INVALID TARGET ENVIRONMENT: '$TargetEnvironment'"
+                Write-Host ""
+                Write-Host "🔧 VALID OPTIONS:" -ForegroundColor Cyan
+                Write-Host "   • DEV (or DEVELOPMENT)" -ForegroundColor White
+                Write-Host "   • UAT" -ForegroundColor White  
+                Write-Host "   • PROD (or PRODUCTION)" -ForegroundColor White
+                Write-Host ""
+                Write-Host "💡 HOW TO SET TARGET ENVIRONMENT:" -ForegroundColor Cyan
+                Write-Host "   1. Azure DevOps → Pipelines → Edit → Variables tab" -ForegroundColor White
+                Write-Host "   2. Set 'TargetEnvironment' variable to: DEV, UAT, or PROD" -ForegroundColor White
+                Write-Host "   3. Save and run the pipeline" -ForegroundColor White
+                Write-Host ""
+                Write-Host "🚀 OR use Azure CLI:" -ForegroundColor Cyan
+                Write-Host "   az pipelines run --name 'YourPipelineName' --variables TargetEnvironment=PROD" -ForegroundColor White
+                exit 1
+            }
+        }
+        
+        # Workspace ID validation
+        if ($WorkspaceId -like "*your-*-workspace-id-here*" -or [string]::IsNullOrWhiteSpace($WorkspaceId)) {
+            Write-Error "❌ Workspace ID not configured for $TargetEnvironment environment!"
+            Write-Host ""
+            Write-Host "🔧 CONFIGURATION NEEDED:" -ForegroundColor Cyan
+            switch ($TargetEnvironment.ToUpper()) {
+                "DEV" { Write-Host "   Set 'DevWorkspaceId' pipeline variable" -ForegroundColor White }
+                "UAT" { Write-Host "   Set 'UatWorkspaceId' pipeline variable" -ForegroundColor White }
+                "PROD" { Write-Host "   Set 'ProdWorkspaceId' pipeline variable" -ForegroundColor White }
+            }
+            exit 1
+        }
+        
+        # ===== DEPLOYMENT CONFIRMATION DISPLAY =====
+        Write-Host ""
+        Write-Host "=" * 70 -ForegroundColor Cyan
+        Write-Host "🚀 DEPLOYMENT CONFIGURATION CONFIRMED" -ForegroundColor Cyan
+        Write-Host "=" * 70 -ForegroundColor Cyan
+        Write-Host "🎯 Environment Type: $EnvironmentType" -ForegroundColor $DisplayColor
+        Write-Host "🏢 Target Workspace: $WorkspaceName" -ForegroundColor $DisplayColor
+        Write-Host "🆔 Workspace ID: $WorkspaceId" -ForegroundColor $DisplayColor
+        Write-Host "🔗 SharePoint URL: $TargetSharePointUrl" -ForegroundColor $DisplayColor
+        Write-Host "🌐 Gateway ID: $TargetGatewayId" -ForegroundColor $DisplayColor
+        Write-Host "📦 Project: $(ProjectName)" -ForegroundColor White
+        Write-Host "=" * 70 -ForegroundColor Cyan
+        Write-Host ""
+        
+        # ===== AUTHENTICATION =====
+        Write-Host "🔐 Authenticating with Fabric API using Service Principal..."
+        
+        # Set Working Directory
+        $currentPath = (Split-Path $MyInvocation.MyCommand.Definition -Parent)
+        Set-Location $currentPath
+
+        # Create module directory
+        $moduleFolder = ".\module"
+        New-Item -ItemType Directory -Path $moduleFolder -ErrorAction SilentlyContinue | Out-Null
+
+        # Download FabricPS-PBIP module files
+        @(
+            "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
+            "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+        ) | ForEach-Object {
+            $file = Split-Path $_ -Leaf
+            Invoke-WebRequest -Uri $_ -OutFile (Join-Path $moduleFolder $file) -UseBasicParsing
+        }
+
+        Import-Module Az.Accounts -Force
+        Import-Module (Join-Path $moduleFolder "FabricPS-PBIP.psd1") -Force
+
+        # Authenticate with Fabric using Service Principal
+        Set-FabricAuthToken `
+          -servicePrincipalId "$(ClientId)" `
+          -servicePrincipalSecret "$(ClientSecret)" `
+          -tenantId "$(TenantId)" `
+          -reset
+
+        # ===== DEPLOYMENT PATHS =====
+        $pbipFolder = "$(BaseFolder)"
+        $projectName = "$(ProjectName)"
+        $semanticModelPath = Join-Path $pbipFolder "$projectName.SemanticModel"
+        $reportPath = Join-Path $pbipFolder "$projectName.Report"
+
+        # Validate paths
+        if (!(Test-Path $semanticModelPath) -or !(Test-Path $reportPath)) {
+          Write-Error "❌ Missing .SemanticModel or .Report folder for '$projectName' in $pbipFolder"
+          exit 1
+        }
+
+        # ===== FABRIC IMPORT =====
+        Write-Host "📥 Importing Semantic Model to $EnvironmentType..."
+        $semanticModelImport = Import-FabricItem -workspaceId $WorkspaceId -path $semanticModelPath
+
+        Write-Host "📄 Importing Report and binding to Semantic Model..."
+        $reportImport = Import-FabricItem -workspaceId $WorkspaceId -path $reportPath -itemProperties @{
+          "semanticModelId" = $semanticModelImport.Id
+        }
+
+        Write-Host "✅ Successfully published '$projectName' to $EnvironmentType workspace '$WorkspaceName'"
+
+        # ===== REST API ACCESS TOKEN =====
+        Write-Host "🔑 Getting access token for REST API operations..."
+        $body = @{
+            grant_type    = "client_credentials"
+            client_id     = "$(ClientId)"
+            client_secret = "$(ClientSecret)"
+            scope         = "https://analysis.windows.net/powerbi/api/.default"
+        }
+        $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token" `
+            -Method POST -Body $body
+        $accessToken = $tokenResponse.access_token
+
+        # ===== DATASOURCE CONFIGURATION =====
+        Write-Host "🔗 Configuring datasources for $EnvironmentType environment..."
+        $datasourcesUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/datasources"
+        
+        try {
+            $datasources = Invoke-RestMethod -Uri $datasourcesUrl -Method GET -Headers @{
+                "Authorization" = "Bearer $accessToken"
+            }
+            
+            Write-Host "📋 Found $($datasources.value.Count) datasource(s) in the dataset"
+            
+            # Find SharePoint datasources
+            $sharePointDatasources = $datasources.value | Where-Object { 
+                $_.datasourceType -in @("SharePointList", "SharePointFolder", "SharePointOnlineList") 
+            }
+            
+            if ($sharePointDatasources.Count -gt 0) {
+                Write-Host "🔄 Updating $($sharePointDatasources.Count) SharePoint datasource(s) to $EnvironmentType environment..."
+                
+                # Update datasource connections
+                $updateUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.UpdateDatasources"
+                
+                foreach ($spDs in $sharePointDatasources) {
+                    Write-Host "   🔄 Updating: $($spDs.datasourceType) → $TargetSharePointUrl"
+                    
+                    $updateBody = @{
+                        updateDetails = @(
+                            @{
+                                datasourceSelector = @{
+                                    datasourceType = $spDs.datasourceType
+                                    connectionDetails = $spDs.connectionDetails
+                                }
+                                connectionDetails = @{ 
+                                    url = $TargetSharePointUrl 
+                                }
+                                credentialDetails = @{
+                                    credentialType = "OAuth2"
+                                    credentials = (@{ token = $accessToken } | ConvertTo-Json -Compress)
+                                    privacyLevel = "Organizational"
+                                }
+                            }
+                        )
+                    } | ConvertTo-Json -Depth 10
+
+                    try {
+                        Invoke-RestMethod -Uri $updateUrl -Method POST -Headers @{
+                            "Authorization" = "Bearer $accessToken"
+                            "Content-Type" = "application/json"
+                        } -Body $updateBody
+                        
+                        Write-Host "   ✅ Datasource updated successfully"
+                    }
+                    catch {
+                        Write-Warning "   ⚠️ Datasource update failed: $($_.Exception.Message)"
+                    }
+                }
+                
+                # Gateway binding (if specified)
+                if ($TargetGatewayId -and $TargetGatewayId -ne "" -and $TargetGatewayId -notlike "*your-*-gateway-id-here*") {
+                    Write-Host "🌐 Binding dataset to $EnvironmentType gateway..."
+                    try {
+                        $gatewayBindUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.BindToGateway"
+                        $gatewayBindBody = @{
+                            gatewayObjectId = $TargetGatewayId
+                        } | ConvertTo-Json
+
+                        Invoke-RestMethod -Uri $gatewayBindUrl -Method POST -Headers @{
+                            "Authorization" = "Bearer $accessToken"
+                            "Content-Type" = "application/json"
+                        } -Body $gatewayBindBody
+                        
+                        Write-Host "✅ Gateway binding successful"
+                    }
+                    catch {
+                        Write-Warning "⚠️ Gateway binding failed: $($_.Exception.Message)"
+                    }
+                }
+            }
+            else {
+                Write-Host "📋 No SharePoint datasources found to configure"
+            }
+        }
+        catch {
+            Write-Warning "⚠️ Could not retrieve/configure datasources: $($_.Exception.Message)"
+        }
+
+        # ===== DATASET REFRESH =====
+        Write-Host "🔄 Triggering dataset refresh..."
+        try {
+            $refreshUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/refreshes"
+            Invoke-RestMethod -Uri $refreshUrl -Method POST -Headers @{
+                "Authorization" = "Bearer $accessToken"
+                "Content-Type" = "application/json"
+            }
+            Write-Host "✅ Dataset refresh initiated"
+        }
+        catch {
+            Write-Warning "⚠️ Dataset refresh failed: $($_.Exception.Message)"
+            Write-Host "💡 You may need to refresh manually from Power BI Service"
+        }
+
+        # ===== FINAL SUCCESS MESSAGE =====
+        Write-Host ""
+        Write-Host "🎉 DEPLOYMENT COMPLETED SUCCESSFULLY!" -ForegroundColor Green
+        Write-Host "📊 Project '$projectName' deployed to $EnvironmentType" -ForegroundColor Green
+        Write-Host "🏢 Workspace: $WorkspaceName" -ForegroundColor Green
+        Write-Host "🔗 Configured for: $TargetSharePointUrl" -ForegroundColor Green
+        Write-Host ""
