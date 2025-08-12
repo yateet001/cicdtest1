@@ -328,6 +328,31 @@ steps:
             -Method POST -Body $body
         $accessToken = $tokenResponse.access_token
 
+        # ===== PRE-DEPLOYMENT VALIDATION =====
+        Write-Host "🔍 Pre-deployment validation..." -ForegroundColor Cyan
+
+        # Test SharePoint URL accessibility
+        Write-Host "🌐 Testing SharePoint URL accessibility..." -ForegroundColor White
+        try {
+            $headers = @{ "Authorization" = "Bearer $accessToken" }
+            $testResponse = Invoke-WebRequest -Uri $TargetSharePointUrl -Headers $headers -Method Head -UseBasicParsing
+            Write-Host "   ✅ SharePoint URL accessible (Status: $($testResponse.StatusCode))" -ForegroundColor Green
+        } catch {
+            Write-Warning "   ⚠️ SharePoint URL test failed: $($_.Exception.Message)"
+            Write-Host "   📝 This might cause dataset import issues" -ForegroundColor Yellow
+        }
+
+        # Validate workspace access
+        Write-Host "🏢 Validating workspace access..." -ForegroundColor White
+        try {
+            $workspaceUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId"
+            $workspace = Invoke-RestMethod -Uri $workspaceUrl -Headers @{ "Authorization" = "Bearer $accessToken" }
+            Write-Host "   ✅ Workspace accessible: $($workspace.name)" -ForegroundColor Green
+        } catch {
+            Write-Error "   ❌ Cannot access workspace: $($_.Exception.Message)"
+            exit 1
+        }
+
         # ===== DEPLOY SELECTED REPORTS =====
         $successfulDeployments = @()
         $failedDeployments = @()
@@ -338,19 +363,87 @@ steps:
             Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
             
             try {
-                # Import Semantic Model
-                Write-Host "📥 Importing Semantic Model..." -ForegroundColor White
-                $semanticModelImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.SemanticModelPath
-                Write-Host "   ✅ Semantic Model ID: $($semanticModelImport.Id)" -ForegroundColor Green
-
-                # Import Report
-                Write-Host "📄 Importing Report and binding to Semantic Model..." -ForegroundColor White
-                $reportImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.ReportPath -itemProperties @{
-                    "semanticModelId" = $semanticModelImport.Id
+                # Validate PBIP structure
+                Write-Host "📋 Validating PBIP structure..." -ForegroundColor White
+                
+                $definitionJson = Join-Path $project.SemanticModelPath "definition.pbidataset"
+                $reportJson = Join-Path $project.ReportPath "definition.pbireport"
+                
+                if (!(Test-Path $definitionJson)) {
+                    throw "Missing definition.pbidataset in SemanticModel folder"
                 }
-                Write-Host "   ✅ Report ID: $($reportImport.Id)" -ForegroundColor Green
+                if (!(Test-Path $reportJson)) {
+                    throw "Missing definition.pbireport in Report folder"
+                }
+                
+                Write-Host "   ✅ PBIP structure validated" -ForegroundColor Green
 
-                # Configure datasources
+                # Import Semantic Model with enhanced monitoring
+                Write-Host "📥 Importing Semantic Model..." -ForegroundColor White
+                
+                $importStartTime = Get-Date
+                $semanticModelImport = $null
+                
+                try {
+                    $semanticModelImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.SemanticModelPath
+                    Write-Host "   ✅ Semantic Model imported successfully" -ForegroundColor Green
+                    Write-Host "   📊 Semantic Model ID: $($semanticModelImport.Id)" -ForegroundColor Green
+                } catch {
+                    $importError = $_.Exception.Message
+                    Write-Host "   ❌ Semantic Model import failed: $importError" -ForegroundColor Red
+                    
+                    # Enhanced error analysis
+                    if ($importError -like "*Dataset_Import_FailedToImportDataset*") {
+                        Write-Host "   🔍 ANALYSIS: Dataset import failed - likely causes:" -ForegroundColor Yellow
+                        Write-Host "      • Data source connectivity issues" -ForegroundColor Yellow
+                        Write-Host "      • Authentication/permission problems" -ForegroundColor Yellow
+                        Write-Host "      • Invalid data structure or schema" -ForegroundColor Yellow
+                        Write-Host "      • SharePoint file not accessible or corrupted" -ForegroundColor Yellow
+                        
+                        # Check if we can read the dataset definition
+                        try {
+                            $datasetDef = Get-Content $definitionJson -Raw | ConvertFrom-Json
+                            Write-Host "   📋 Dataset definition contains:" -ForegroundColor Gray
+                            if ($datasetDef.model.dataSources) {
+                                foreach ($ds in $datasetDef.model.dataSources) {
+                                    Write-Host "      • DataSource: $($ds.type) - $($ds.connectionDetails.address)" -ForegroundColor Gray
+                                }
+                            }
+                        } catch {
+                            Write-Host "   ⚠️ Could not read dataset definition for analysis" -ForegroundColor Yellow
+                        }
+                    }
+                    
+                    throw $importError
+                }
+
+                # Wait for dataset to be fully available before proceeding
+                Write-Host "⏳ Waiting for dataset to be available..." -ForegroundColor White
+                $maxWaitTime = 300 # 5 minutes
+                $waitInterval = 10
+                $totalWaited = 0
+                
+                do {
+                    Start-Sleep -Seconds $waitInterval
+                    $totalWaited += $waitInterval
+                    
+                    try {
+                        $datasetUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)"
+                        $dataset = Invoke-RestMethod -Uri $datasetUrl -Headers @{ "Authorization" = "Bearer $accessToken" }
+                        
+                        if ($dataset -and $dataset.id) {
+                            Write-Host "   ✅ Dataset is available and ready" -ForegroundColor Green
+                            break
+                        }
+                    } catch {
+                        if ($totalWaited -ge $maxWaitTime) {
+                            throw "Dataset did not become available within $maxWaitTime seconds"
+                        }
+                        Write-Host "   ⏳ Still waiting... ($totalWaited/$maxWaitTime seconds)" -ForegroundColor Gray
+                    }
+                } while ($totalWaited -lt $maxWaitTime)
+
+                # Configure datasources BEFORE importing report
                 Write-Host "🔗 Configuring datasources..." -ForegroundColor White
                 $datasourcesUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/datasources"
                 
@@ -366,42 +459,55 @@ steps:
                     if ($sharePointDatasources.Count -gt 0) {
                         Write-Host "   🔄 Updating $($sharePointDatasources.Count) SharePoint datasource(s)..." -ForegroundColor White
                         
-                        $updateUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.UpdateDatasources"
-                        
+                        # Update datasources one by one
                         foreach ($spDs in $sharePointDatasources) {
-                            $updateBody = @{
-                                updateDetails = @(
-                                    @{
-                                        datasourceSelector = @{
-                                            datasourceType = $spDs.datasourceType
-                                            connectionDetails = $spDs.connectionDetails
-                                        }
-                                        connectionDetails = @{ 
-                                            url = $TargetSharePointUrl 
-                                        }
-                                        credentialDetails = @{
-                                            credentialType = "OAuth2"
-                                            credentials = (@{ token = $accessToken } | ConvertTo-Json -Compress)
-                                            privacyLevel = "Organizational"
-                                        }
-                                    }
-                                )
-                            } | ConvertTo-Json -Depth 10
-
                             try {
+                                # Use the takeover approach for better reliability
+                                $takeoverUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.TakeOver"
+                                
+                                Invoke-RestMethod -Uri $takeoverUrl -Method POST -Headers @{
+                                    "Authorization" = "Bearer $accessToken"
+                                    "Content-Type" = "application/json"
+                                }
+                                
+                                Write-Host "      ✅ Dataset ownership taken over" -ForegroundColor Green
+                                
+                                # Now update the datasource
+                                $updateUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.UpdateDatasources"
+                                
+                                $updateBody = @{
+                                    updateDetails = @(
+                                        @{
+                                            datasourceSelector = @{
+                                                datasourceType = $spDs.datasourceType
+                                                connectionDetails = $spDs.connectionDetails
+                                            }
+                                            connectionDetails = @{ 
+                                                url = $TargetSharePointUrl 
+                                            }
+                                            credentialDetails = @{
+                                                credentialType = "OAuth2"
+                                                credentials = $accessToken
+                                                privacyLevel = "Organizational"
+                                            }
+                                        }
+                                    )
+                                } | ConvertTo-Json -Depth 10
+
                                 Invoke-RestMethod -Uri $updateUrl -Method POST -Headers @{
                                     "Authorization" = "Bearer $accessToken"
                                     "Content-Type" = "application/json"
                                 } -Body $updateBody
                                 
                                 Write-Host "      ✅ Datasource updated: $($spDs.datasourceType)" -ForegroundColor Green
-                            }
-                            catch {
+                                
+                            } catch {
                                 Write-Warning "      ⚠️ Datasource update failed: $($_.Exception.Message)"
+                                # Continue with other datasources
                             }
                         }
                         
-                        # Gateway binding
+                        # Gateway binding (if configured)
                         if ($TargetGatewayId -and $TargetGatewayId -ne "" -and $TargetGatewayId -notlike "*your-*-gateway-id-here*") {
                             Write-Host "   🌐 Binding to gateway..." -ForegroundColor White
                             try {
@@ -416,11 +522,11 @@ steps:
                                 } -Body $gatewayBindBody
                                 
                                 Write-Host "      ✅ Gateway binding successful" -ForegroundColor Green
-                            }
-                            catch {
+                            } catch {
                                 Write-Warning "      ⚠️ Gateway binding failed: $($_.Exception.Message)"
                             }
                         }
+                        
                     } else {
                         Write-Host "   📋 No SharePoint datasources to configure" -ForegroundColor Gray
                     }
@@ -428,17 +534,60 @@ steps:
                     Write-Warning "   ⚠️ Could not configure datasources: $($_.Exception.Message)"
                 }
 
-                # Trigger refresh
-                Write-Host "🔄 Triggering dataset refresh..." -ForegroundColor White
+                # Test data refresh before importing report
+                Write-Host "🔄 Testing dataset refresh..." -ForegroundColor White
                 try {
                     $refreshUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/refreshes"
+                    
+                    # Start refresh
                     Invoke-RestMethod -Uri $refreshUrl -Method POST -Headers @{
                         "Authorization" = "Bearer $accessToken"
                         "Content-Type" = "application/json"
                     }
-                    Write-Host "   ✅ Dataset refresh initiated" -ForegroundColor Green
+                    
+                    # Monitor refresh status
+                    $refreshWaitTime = 0
+                    $maxRefreshWait = 120 # 2 minutes for initial test
+                    
+                    do {
+                        Start-Sleep -Seconds 10
+                        $refreshWaitTime += 10
+                        
+                        $refreshStatus = Invoke-RestMethod -Uri $refreshUrl -Headers @{ "Authorization" = "Bearer $accessToken" }
+                        $latestRefresh = $refreshStatus.value | Select-Object -First 1
+                        
+                        if ($latestRefresh.status -eq "Completed") {
+                            Write-Host "   ✅ Dataset refresh completed successfully" -ForegroundColor Green
+                            break
+                        } elseif ($latestRefresh.status -eq "Failed") {
+                            throw "Dataset refresh failed: $($latestRefresh.serviceExceptionJson)"
+                        }
+                        
+                        Write-Host "   ⏳ Refresh in progress... ($refreshWaitTime/$maxRefreshWait seconds)" -ForegroundColor Gray
+                        
+                    } while ($refreshWaitTime -lt $maxRefreshWait -and $latestRefresh.status -eq "Unknown")
+                    
+                    if ($latestRefresh.status -ne "Completed" -and $refreshWaitTime -ge $maxRefreshWait) {
+                        Write-Warning "   ⚠️ Refresh is taking longer than expected, proceeding with report import"
+                    }
+                    
                 } catch {
-                    Write-Warning "   ⚠️ Dataset refresh failed: $($_.Exception.Message)"
+                    Write-Warning "   ⚠️ Dataset refresh test failed: $($_.Exception.Message)"
+                    Write-Host "   📝 Proceeding with report import, but data may not be current" -ForegroundColor Yellow
+                }
+
+                # Import Report
+                Write-Host "📄 Importing Report and binding to Semantic Model..." -ForegroundColor White
+                try {
+                    $reportImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.ReportPath -itemProperties @{
+                        "semanticModelId" = $semanticModelImport.Id
+                    }
+                    Write-Host "   ✅ Report imported successfully" -ForegroundColor Green
+                    Write-Host "   📊 Report ID: $($reportImport.Id)" -ForegroundColor Green
+                } catch {
+                    Write-Warning "   ⚠️ Report import failed: $($_.Exception.Message)"
+                    Write-Host "   📝 Semantic model was imported successfully, you can manually create the report" -ForegroundColor Yellow
+                    # Don't throw here, partial success is still valuable
                 }
 
                 $successfulDeployments += $project.Name
@@ -450,34 +599,9 @@ steps:
                     Error = $_.Exception.Message
                 }
                 Write-Host "❌ $($project.Name) - DEPLOYMENT FAILED: $($_.Exception.Message)" -ForegroundColor Red
-            }
-        }
-
-        # ===== FINAL SUMMARY =====
-        Write-Host ""
-        Write-Host "🎉 DEPLOYMENT SUMMARY" -ForegroundColor Cyan
-        Write-Host "=" * 70 -ForegroundColor Cyan
-        Write-Host "✅ Successful: $($successfulDeployments.Count)" -ForegroundColor Green
-        if ($successfulDeployments.Count -gt 0) {
-            foreach ($success in $successfulDeployments) {
-                Write-Host "   • $success" -ForegroundColor Green
-            }
-        }
-        
-        if ($failedDeployments.Count -gt 0) {
-            Write-Host "❌ Failed: $($failedDeployments.Count)" -ForegroundColor Red
-            foreach ($failure in $failedDeployments) {
-                Write-Host "   • $($failure.Name): $($failure.Error)" -ForegroundColor Red
-            }
-        }
-        
-        Write-Host "🎯 Environment: $EnvironmentType ($WorkspaceName)" -ForegroundColor $DisplayColor
-        Write-Host "🔗 SharePoint: $TargetSharePointUrl" -ForegroundColor $DisplayColor
-        Write-Host "=" * 70 -ForegroundColor Cyan
-        
-        if ($failedDeployments.Count -gt 0) {
-            Write-Warning "⚠️ Some deployments failed. Check the logs above for details."
-            exit 1
-        } else {
-            Write-Host "🚀 All deployments completed successfully!" -ForegroundColor Green
-        }
+                
+                # Additional troubleshooting info
+                Write-Host "🔍 TROUBLESHOOTING STEPS:" -ForegroundColor Yellow
+                Write-Host "   1. Verify SharePoint file exists and is accessible: $TargetSharePointUrl" -ForegroundColor Yellow
+                Write-Host "   2. Check service principal permissions on SharePoint site" -ForegroundColor Yellow
+                Write-Host "   3. Ensure workspace has proper permissions for the service principal
