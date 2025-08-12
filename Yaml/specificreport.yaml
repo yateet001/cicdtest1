@@ -1,0 +1,483 @@
+trigger: none
+
+# Pipeline Parameters for selective deployment
+parameters:
+  - name: targetEnvironment
+    displayName: 'Deploy to Environment'
+    type: string
+    default: 'UAT'
+    values:
+      - 'DEV'
+      - 'UAT'
+      - 'PROD'
+
+  - name: deploymentMode
+    displayName: 'Deployment Mode'
+    type: string
+    default: 'SELECTIVE'
+    values:
+      - 'ALL'        # Deploy all reports
+      - 'SELECTIVE'  # Deploy only specified reports
+
+  - name: reportNames
+    displayName: 'Report Names (comma-separated, e.g: Sales1,Sales5,Sales10)'
+    type: string
+    default: 'Sales Dashboard 2'
+
+  - name: autoDetectChanges
+    displayName: 'Auto-detect changed reports from Git?'
+    type: boolean
+    default: false
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  TenantId: 'e4d98dd2-9199-42e5-ba8b-da3e763ede2e'
+  ClientId: 'dd3aa383-4d69-4854-8885-9e483ffb5b72'
+  ClientSecret: '82H8Q~TuZnTU9XRytWpK46g.YP_QoTTUww-NWday'
+  BaseFolder: '$(Build.SourcesDirectory)\Sales'
+  
+  # Environment Configuration
+  DevWorkspaceId: 'b42dfb7f-667e-48f9-97c9-12198c700e09'
+  DevWorkspaceName: 'VISACICDDev'
+  DevSharePointUrl: 'https://testmaq.sharepoint.com/sites/VisaTest/Shared%20Documents/Dev/SalesDashboard.xlsx'
+  DevGatewayId: 'fabd7e5d-1737-4c50-88c0-7ec4874f99e5'
+  
+  UatWorkspaceId: '436d60a0-3a50-480d-b7e5-f7a9d3cd5fb5'
+  UatWorkspaceName: 'VISACICDQA'
+  UatSharePointUrl: 'https://testmaq.sharepoint.com/sites/VisaTest/Shared%20Documents/Uat/SalesDashboard.xlsx'
+  UatGatewayId: 'd91d80d8-19e2-4959-af4b-74d40bde50d8'
+  
+  ProdWorkspaceId: 'cb0a4bb8-e16a-4886-b803-4dcceda22cd0'
+  ProdWorkspaceName: 'VISACICDProd'
+  ProdSharePointUrl: 'https://testmaq.sharepoint.com/sites/VisaTest/Shared%20Documents/Prod/SalesDashboard.xlsx'
+  ProdGatewayId: '757a32db-a93c-4516-9f43-da8968e99aac'
+
+steps:
+  - task: PowerShell@2
+    displayName: '🎯 Selective Report Deployment'
+    inputs:
+      targetType: 'inline'
+      pwsh: true
+      script: |
+        $ErrorActionPreference = "Stop"
+
+        # ===== DEPLOYMENT PARAMETERS =====
+        $TargetEnvironment = "${{ parameters.targetEnvironment }}"
+        $DeploymentMode = "${{ parameters.deploymentMode }}"
+        $ReportNamesInput = "${{ parameters.reportNames }}"
+        $AutoDetectChanges = [System.Convert]::ToBoolean("${{ parameters.autoDetectChanges }}")
+        
+        Write-Host "🚀 SELECTIVE REPORT DEPLOYMENT PIPELINE" -ForegroundColor Cyan
+        Write-Host "=" * 60 -ForegroundColor Cyan
+        Write-Host "🎯 Target Environment: $TargetEnvironment" -ForegroundColor White
+        Write-Host "🔄 Deployment Mode: $DeploymentMode" -ForegroundColor White
+        Write-Host "📝 Auto-detect Changes: $AutoDetectChanges" -ForegroundColor White
+        Write-Host "📋 Report Names Input: '$ReportNamesInput'" -ForegroundColor White
+        Write-Host "=" * 60 -ForegroundColor Cyan
+        Write-Host ""
+
+        # ===== ENVIRONMENT CONFIGURATION =====
+        switch ($TargetEnvironment.ToUpper().Trim()) {
+            "DEV" {
+                $EnvironmentType = "DEVELOPMENT"
+                $WorkspaceId = "$(DevWorkspaceId)"
+                $WorkspaceName = "$(DevWorkspaceName)"
+                $TargetSharePointUrl = "$(DevSharePointUrl)"
+                $TargetGatewayId = "$(DevGatewayId)"
+                $DisplayColor = "Green"
+            }
+            "UAT" {
+                $EnvironmentType = "UAT"
+                $WorkspaceId = "$(UatWorkspaceId)"
+                $WorkspaceName = "$(UatWorkspaceName)"
+                $TargetSharePointUrl = "$(UatSharePointUrl)"
+                $TargetGatewayId = "$(UatGatewayId)"
+                $DisplayColor = "Yellow"
+            }
+            "PROD" {
+                $EnvironmentType = "PRODUCTION"
+                $WorkspaceId = "$(ProdWorkspaceId)"
+                $WorkspaceName = "$(ProdWorkspaceName)"
+                $TargetSharePointUrl = "$(ProdSharePointUrl)"
+                $TargetGatewayId = "$(ProdGatewayId)"
+                $DisplayColor = "Red"
+                
+                Write-Host "⚠️  WARNING: DEPLOYING TO PRODUCTION ENVIRONMENT!" -ForegroundColor Red
+                Write-Host "🔴 This will affect live production data!" -ForegroundColor Red
+            }
+            default {
+                Write-Error "❌ Invalid target environment: '$TargetEnvironment'"
+                exit 1
+            }
+        }
+
+        Write-Host "🏢 Target Workspace: $WorkspaceName ($WorkspaceId)" -ForegroundColor $DisplayColor
+        Write-Host ""
+
+        # ===== DISCOVER AVAILABLE REPORTS =====
+        $pbipFolder = "$(BaseFolder)"
+        Write-Host "🔍 Discovering available reports in: $pbipFolder"
+
+        if (!(Test-Path $pbipFolder)) {
+            Write-Error "❌ Base folder not found: $pbipFolder"
+            exit 1
+        }
+
+        # Find all .SemanticModel and .Report folders
+        $allSemanticModels = Get-ChildItem -Path $pbipFolder -Directory | Where-Object { $_.Name -like "*.SemanticModel" }
+        $allReports = Get-ChildItem -Path $pbipFolder -Directory | Where-Object { $_.Name -like "*.Report" }
+
+        $availableProjects = @()
+        foreach ($sm in $allSemanticModels) {
+            $projectBaseName = $sm.Name -replace '\.SemanticModel$', ''
+            $correspondingReport = $allReports | Where-Object { $_.Name -eq "$projectBaseName.Report" }
+            
+            if ($correspondingReport) {
+                $availableProjects += @{
+                    Name = $projectBaseName
+                    SemanticModelPath = $sm.FullName
+                    ReportPath = $correspondingReport.FullName
+                }
+            }
+        }
+
+        Write-Host "📊 Found $($availableProjects.Count) complete Power BI projects:" -ForegroundColor Cyan
+        foreach ($project in $availableProjects) {
+            Write-Host "   • $($project.Name)" -ForegroundColor White
+        }
+        Write-Host ""
+
+        if ($availableProjects.Count -eq 0) {
+            Write-Error "❌ No complete Power BI projects found (need both .SemanticModel and .Report folders)"
+            exit 1
+        }
+
+        # ===== DETERMINE WHICH REPORTS TO DEPLOY =====
+        $reportsToDeployList = @()
+
+        if ($DeploymentMode -eq "ALL") {
+            Write-Host "📋 DEPLOY ALL MODE: Deploying all $($availableProjects.Count) reports" -ForegroundColor Cyan
+            $reportsToDeployList = $availableProjects
+        }
+        elseif ($AutoDetectChanges) {
+            Write-Host "🔍 AUTO-DETECT MODE: Analyzing Git changes..." -ForegroundColor Cyan
+            
+            try {
+                # Get changed files in the last commit or compare with main branch
+                $changedFiles = @()
+                
+                # Try to get files changed in current commit vs previous
+                try {
+                    $changedFiles = git diff --name-only HEAD~1 HEAD 2>$null
+                } catch {
+                    # Fallback: get all files changed vs main/master
+                    try {
+                        $changedFiles = git diff --name-only origin/main HEAD 2>$null
+                    } catch {
+                        try {
+                            $changedFiles = git diff --name-only origin/master HEAD 2>$null
+                        } catch {
+                            Write-Warning "⚠️ Could not detect Git changes, falling back to manual selection"
+                            $changedFiles = @()
+                        }
+                    }
+                }
+                
+                if ($changedFiles.Count -gt 0) {
+                    Write-Host "📝 Found $($changedFiles.Count) changed files:"
+                    $changedFiles | ForEach-Object { Write-Host "   • $_" -ForegroundColor Gray }
+                    
+                    # Find which projects have changes
+                    $changedProjects = @()
+                    foreach ($project in $availableProjects) {
+                        $hasChanges = $false
+                        foreach ($file in $changedFiles) {
+                            if ($file -like "*$($project.Name)*") {
+                                $hasChanges = $true
+                                break
+                            }
+                        }
+                        if ($hasChanges) {
+                            $changedProjects += $project
+                        }
+                    }
+                    
+                    if ($changedProjects.Count -gt 0) {
+                        Write-Host "🎯 Auto-detected $($changedProjects.Count) changed projects:" -ForegroundColor Green
+                        foreach ($project in $changedProjects) {
+                            Write-Host "   ✅ $($project.Name)" -ForegroundColor Green
+                        }
+                        $reportsToDeployList = $changedProjects
+                    } else {
+                        Write-Host "ℹ️ No Power BI projects detected in changed files" -ForegroundColor Yellow
+                    }
+                } else {
+                    Write-Host "ℹ️ No changed files detected" -ForegroundColor Yellow
+                }
+            } catch {
+                Write-Warning "⚠️ Git auto-detection failed: $($_.Exception.Message)"
+            }
+        }
+        
+        # Manual selection (either as primary mode or fallback)
+        if ($DeploymentMode -eq "SELECTIVE" -or ($AutoDetectChanges -and $reportsToDeployList.Count -eq 0)) {
+            Write-Host "📝 SELECTIVE MODE: Manual report selection" -ForegroundColor Cyan
+            
+            if ([string]::IsNullOrWhiteSpace($ReportNamesInput)) {
+                Write-Host ""
+                Write-Host "❌ No reports specified for selective deployment!" -ForegroundColor Red
+                Write-Host ""
+                Write-Host "💡 AVAILABLE OPTIONS:" -ForegroundColor Cyan
+                Write-Host "   1. Specify reports in 'Report Names' parameter:" -ForegroundColor White
+                foreach ($project in $availableProjects) {
+                    Write-Host "      • $($project.Name)" -ForegroundColor Gray
+                }
+                Write-Host ""
+                Write-Host "   2. Example: Sales1,Sales5,Sales10" -ForegroundColor Yellow
+                Write-Host "   3. Or change Deployment Mode to 'ALL'" -ForegroundColor Yellow
+                Write-Host "   4. Or enable 'Auto-detect changed reports'" -ForegroundColor Yellow
+                exit 1
+            }
+            
+            # Parse report names
+            $requestedReports = $ReportNamesInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+            
+            Write-Host "📋 Requested reports: $($requestedReports -join ', ')" -ForegroundColor White
+            
+            # Validate and find matching projects
+            $foundReports = @()
+            $missingReports = @()
+            
+            foreach ($reportName in $requestedReports) {
+                $matchedProject = $availableProjects | Where-Object { $_.Name -eq $reportName }
+                if ($matchedProject) {
+                    $foundReports += $matchedProject
+                    Write-Host "   ✅ $reportName - Found" -ForegroundColor Green
+                } else {
+                    $missingReports += $reportName
+                    Write-Host "   ❌ $reportName - Not Found" -ForegroundColor Red
+                }
+            }
+            
+            if ($missingReports.Count -gt 0) {
+                Write-Host ""
+                Write-Host "❌ Missing reports: $($missingReports -join ', ')" -ForegroundColor Red
+                Write-Host "💡 Available reports:" -ForegroundColor Cyan
+                foreach ($project in $availableProjects) {
+                    Write-Host "   • $($project.Name)" -ForegroundColor White
+                }
+                exit 1
+            }
+            
+            $reportsToDeployList = $foundReports
+        }
+
+        # Final validation
+        if ($reportsToDeployList.Count -eq 0) {
+            Write-Host "❌ No reports selected for deployment!" -ForegroundColor Red
+            exit 1
+        }
+
+        Write-Host ""
+        Write-Host "🚀 DEPLOYMENT SUMMARY" -ForegroundColor Cyan
+        Write-Host "=" * 50 -ForegroundColor Cyan
+        Write-Host "📊 Reports to deploy: $($reportsToDeployList.Count)" -ForegroundColor $DisplayColor
+        foreach ($report in $reportsToDeployList) {
+            Write-Host "   • $($report.Name)" -ForegroundColor $DisplayColor
+        }
+        Write-Host "🎯 Target: $EnvironmentType ($WorkspaceName)" -ForegroundColor $DisplayColor
+        Write-Host "=" * 50 -ForegroundColor Cyan
+        Write-Host ""
+
+        # ===== AUTHENTICATION =====
+        Write-Host "🔐 Authenticating with Fabric API..."
+        
+        $currentPath = (Split-Path $MyInvocation.MyCommand.Definition -Parent)
+        Set-Location $currentPath
+
+        $moduleFolder = ".\module"
+        New-Item -ItemType Directory -Path $moduleFolder -ErrorAction SilentlyContinue | Out-Null
+
+        @(
+            "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
+            "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+        ) | ForEach-Object {
+            $file = Split-Path $_ -Leaf
+            Invoke-WebRequest -Uri $_ -OutFile (Join-Path $moduleFolder $file) -UseBasicParsing
+        }
+
+        Import-Module Az.Accounts -Force
+        Import-Module (Join-Path $moduleFolder "FabricPS-PBIP.psd1") -Force
+
+        Set-FabricAuthToken `
+          -servicePrincipalId "$(ClientId)" `
+          -servicePrincipalSecret "$(ClientSecret)" `
+          -tenantId "$(TenantId)" `
+          -reset
+
+        # Get REST API access token
+        $body = @{
+            grant_type    = "client_credentials"
+            client_id     = "$(ClientId)"
+            client_secret = "$(ClientSecret)"
+            scope         = "https://analysis.windows.net/powerbi/api/.default"
+        }
+        $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token" `
+            -Method POST -Body $body
+        $accessToken = $tokenResponse.access_token
+
+        # ===== DEPLOY SELECTED REPORTS =====
+        $successfulDeployments = @()
+        $failedDeployments = @()
+
+        foreach ($project in $reportsToDeployList) {
+            Write-Host ""
+            Write-Host "🚀 Deploying: $($project.Name)" -ForegroundColor Cyan
+            Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+            
+            try {
+                # Import Semantic Model
+                Write-Host "📥 Importing Semantic Model..." -ForegroundColor White
+                $semanticModelImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.SemanticModelPath
+                Write-Host "   ✅ Semantic Model ID: $($semanticModelImport.Id)" -ForegroundColor Green
+
+                # Import Report
+                Write-Host "📄 Importing Report and binding to Semantic Model..." -ForegroundColor White
+                $reportImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.ReportPath -itemProperties @{
+                    "semanticModelId" = $semanticModelImport.Id
+                }
+                Write-Host "   ✅ Report ID: $($reportImport.Id)" -ForegroundColor Green
+
+                # Configure datasources
+                Write-Host "🔗 Configuring datasources..." -ForegroundColor White
+                $datasourcesUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/datasources"
+                
+                try {
+                    $datasources = Invoke-RestMethod -Uri $datasourcesUrl -Method GET -Headers @{
+                        "Authorization" = "Bearer $accessToken"
+                    }
+                    
+                    $sharePointDatasources = $datasources.value | Where-Object { 
+                        $_.datasourceType -in @("SharePointList", "SharePointFolder", "SharePointOnlineList") 
+                    }
+                    
+                    if ($sharePointDatasources.Count -gt 0) {
+                        Write-Host "   🔄 Updating $($sharePointDatasources.Count) SharePoint datasource(s)..." -ForegroundColor White
+                        
+                        $updateUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.UpdateDatasources"
+                        
+                        foreach ($spDs in $sharePointDatasources) {
+                            $updateBody = @{
+                                updateDetails = @(
+                                    @{
+                                        datasourceSelector = @{
+                                            datasourceType = $spDs.datasourceType
+                                            connectionDetails = $spDs.connectionDetails
+                                        }
+                                        connectionDetails = @{ 
+                                            url = $TargetSharePointUrl 
+                                        }
+                                        credentialDetails = @{
+                                            credentialType = "OAuth2"
+                                            credentials = (@{ token = $accessToken } | ConvertTo-Json -Compress)
+                                            privacyLevel = "Organizational"
+                                        }
+                                    }
+                                )
+                            } | ConvertTo-Json -Depth 10
+
+                            try {
+                                Invoke-RestMethod -Uri $updateUrl -Method POST -Headers @{
+                                    "Authorization" = "Bearer $accessToken"
+                                    "Content-Type" = "application/json"
+                                } -Body $updateBody
+                                
+                                Write-Host "      ✅ Datasource updated: $($spDs.datasourceType)" -ForegroundColor Green
+                            }
+                            catch {
+                                Write-Warning "      ⚠️ Datasource update failed: $($_.Exception.Message)"
+                            }
+                        }
+                        
+                        # Gateway binding
+                        if ($TargetGatewayId -and $TargetGatewayId -ne "" -and $TargetGatewayId -notlike "*your-*-gateway-id-here*") {
+                            Write-Host "   🌐 Binding to gateway..." -ForegroundColor White
+                            try {
+                                $gatewayBindUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.BindToGateway"
+                                $gatewayBindBody = @{
+                                    gatewayObjectId = $TargetGatewayId
+                                } | ConvertTo-Json
+
+                                Invoke-RestMethod -Uri $gatewayBindUrl -Method POST -Headers @{
+                                    "Authorization" = "Bearer $accessToken"
+                                    "Content-Type" = "application/json"
+                                } -Body $gatewayBindBody
+                                
+                                Write-Host "      ✅ Gateway binding successful" -ForegroundColor Green
+                            }
+                            catch {
+                                Write-Warning "      ⚠️ Gateway binding failed: $($_.Exception.Message)"
+                            }
+                        }
+                    } else {
+                        Write-Host "   📋 No SharePoint datasources to configure" -ForegroundColor Gray
+                    }
+                } catch {
+                    Write-Warning "   ⚠️ Could not configure datasources: $($_.Exception.Message)"
+                }
+
+                # Trigger refresh
+                Write-Host "🔄 Triggering dataset refresh..." -ForegroundColor White
+                try {
+                    $refreshUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/refreshes"
+                    Invoke-RestMethod -Uri $refreshUrl -Method POST -Headers @{
+                        "Authorization" = "Bearer $accessToken"
+                        "Content-Type" = "application/json"
+                    }
+                    Write-Host "   ✅ Dataset refresh initiated" -ForegroundColor Green
+                } catch {
+                    Write-Warning "   ⚠️ Dataset refresh failed: $($_.Exception.Message)"
+                }
+
+                $successfulDeployments += $project.Name
+                Write-Host "✅ $($project.Name) - DEPLOYMENT SUCCESSFUL" -ForegroundColor Green
+
+            } catch {
+                $failedDeployments += @{
+                    Name = $project.Name
+                    Error = $_.Exception.Message
+                }
+                Write-Host "❌ $($project.Name) - DEPLOYMENT FAILED: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+
+        # ===== FINAL SUMMARY =====
+        Write-Host ""
+        Write-Host "🎉 DEPLOYMENT SUMMARY" -ForegroundColor Cyan
+        Write-Host "=" * 70 -ForegroundColor Cyan
+        Write-Host "✅ Successful: $($successfulDeployments.Count)" -ForegroundColor Green
+        if ($successfulDeployments.Count -gt 0) {
+            foreach ($success in $successfulDeployments) {
+                Write-Host "   • $success" -ForegroundColor Green
+            }
+        }
+        
+        if ($failedDeployments.Count -gt 0) {
+            Write-Host "❌ Failed: $($failedDeployments.Count)" -ForegroundColor Red
+            foreach ($failure in $failedDeployments) {
+                Write-Host "   • $($failure.Name): $($failure.Error)" -ForegroundColor Red
+            }
+        }
+        
+        Write-Host "🎯 Environment: $EnvironmentType ($WorkspaceName)" -ForegroundColor $DisplayColor
+        Write-Host "🔗 SharePoint: $TargetSharePointUrl" -ForegroundColor $DisplayColor
+        Write-Host "=" * 70 -ForegroundColor Cyan
+        
+        if ($failedDeployments.Count -gt 0) {
+            Write-Warning "⚠️ Some deployments failed. Check the logs above for details."
+            exit 1
+        } else {
+            Write-Host "🚀 All deployments completed successfully!" -ForegroundColor Green
+        }
