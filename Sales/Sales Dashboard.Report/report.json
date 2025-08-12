@@ -1,0 +1,52 @@
+{
+  "config": "{\"version\":\"5.37\",\"themeCollection\":{\"baseTheme\":{\"name\":\"CY21SU07\",\"type\":2,\"version\":\"5.26\"}},\"activeSectionIndex\":0,\"defaultDrillFilterOtherVisuals\":true,\"linguisticSchemaSyncVersion\":2,\"settings\":{\"useNewFilterPaneExperience\":true,\"allowChangeFilterTypes\":true,\"useStylableVisualContainerHeader\":true,\"exportDataMode\":1,\"useEnhancedTooltips\":true},\"objects\":{\"section\":[{\"properties\":{\"verticalAlignment\":{\"expr\":{\"Literal\":{\"Value\":\"'Top'\"}}}}}]}}",
+  "layoutOptimization": 0,
+  "publicCustomVisuals": [],
+  "resourcePackages": [
+    {
+      "resourcePackage": {
+        "disabled": false,
+        "items": [
+          {
+            "name": "CY21SU07",
+            "path": "BaseThemes/CY21SU07.json",
+            "type": 202
+          }
+        ],
+        "name": "SharedResources",
+        "type": 2
+      }
+    }
+  ],
+  "sections": [
+    {
+      "config": "{}",
+      "displayName": "Page 1",
+      "displayOption": 1,
+      "filters": "[]",
+      "height": 720.00,
+      "name": "ReportSection",
+      "visualContainers": [
+        {
+          "config": "{\"name\":\"2119ad978a7914248049\",\"layouts\":[{\"id\":0,\"position\":{\"x\":35.98784194528876,\"y\":63.22188449848024,\"z\":0,\"width\":680.8510638297872,\"height\":616.6565349544073,\"tabOrder\":0}}],\"singleVisual\":{\"visualType\":\"clusteredBarChart\",\"projections\":{\"Category\":[{\"queryRef\":\"HumanResources Employee.Department Name\",\"active\":true}],\"Y\":[{\"queryRef\":\"Sum(HumanResources Employee.SickLeaveDays)\"},{\"queryRef\":\"Sum(HumanResources Employee.VacationDays)\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"h\",\"Entity\":\"HumanResources Employee\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"h\"}},\"Property\":\"Department Name\"},\"Name\":\"HumanResources Employee.Department Name\"},{\"Aggregation\":{\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"h\"}},\"Property\":\"SickLeaveDays\"}},\"Function\":0},\"Name\":\"Sum(HumanResources Employee.SickLeaveDays)\"},{\"Aggregation\":{\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"h\"}},\"Property\":\"VacationDays\"}},\"Function\":0},\"Name\":\"Sum(HumanResources Employee.VacationDays)\"}],\"OrderBy\":[{\"Direction\":1,\"Expression\":{\"Aggregation\":{\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"h\"}},\"Property\":\"SickLeaveDays\"}},\"Function\":0}}}]},\"drillFilterOtherVisuals\":true}}",
+          "filters": "[]",
+          "height": 616.66,
+          "width": 680.85,
+          "x": 35.99,
+          "y": 63.22,
+          "z": 0.00
+        },
+        {
+          "config": "{\"name\":\"7cb041a04eb50b005ce5\",\"layouts\":[{\"id\":0,\"position\":{\"x\":727.5646497035688,\"y\":62.3626842603059,\"z\":1000,\"width\":266.4587418394888,\"height\":617.9575076703038,\"tabOrder\":1000}}],\"singleVisual\":{\"visualType\":\"tableEx\",\"projections\":{\"Values\":[{\"queryRef\":\"Sum(HumanResources Employee.SickLeaveDays)\"},{\"queryRef\":\"HumanResources Employee.Employee Name\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"h\",\"Entity\":\"HumanResources Employee\",\"Type\":0}],\"Select\":[{\"Aggregation\":{\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"h\"}},\"Property\":\"SickLeaveDays\"}},\"Function\":0},\"Name\":\"Sum(HumanResources Employee.SickLeaveDays)\",\"NativeReferenceName\":\"SickLeaveDays\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"h\"}},\"Property\":\"Employee Name\"},\"Name\":\"HumanResources Employee.Employee Name\",\"NativeReferenceName\":\"Employee Name\"}]},\"drillFilterOtherVisuals\":true}}",
+          "filters": "[]",
+          "height": 617.96,
+          "width": 266.46,
+          "x": 727.56,
+          "y": 62.36,
+          "z": 1000.00
+        }
+      ],
+      "width": 1280.00
+    }
+  ]
+}
