@@ -56,244 +56,37 @@ variables:
 
 steps:
   - task: PowerShell@2
-    displayName: '🎯 Selective Report Deployment'
+    displayName: '🔧 Setup and Authentication'
     inputs:
       targetType: 'inline'
       pwsh: true
       script: |
         $ErrorActionPreference = "Stop"
-
-        # ===== DEPLOYMENT PARAMETERS =====
-        $TargetEnvironment = "${{ parameters.targetEnvironment }}"
-        $DeploymentMode = "${{ parameters.deploymentMode }}"
-        $ReportNamesInput = "${{ parameters.reportNames }}"
-        $AutoDetectChanges = [System.Convert]::ToBoolean("${{ parameters.autoDetectChanges }}")
         
-        Write-Host "🚀 SELECTIVE REPORT DEPLOYMENT PIPELINE" -ForegroundColor Cyan
-        Write-Host "=" * 60 -ForegroundColor Cyan
-        Write-Host "🎯 Target Environment: $TargetEnvironment" -ForegroundColor White
-        Write-Host "🔄 Deployment Mode: $DeploymentMode" -ForegroundColor White
-        Write-Host "📝 Auto-detect Changes: $AutoDetectChanges" -ForegroundColor White
-        Write-Host "📋 Report Names Input: '$ReportNamesInput'" -ForegroundColor White
-        Write-Host "=" * 60 -ForegroundColor Cyan
-        Write-Host ""
-
-        # ===== ENVIRONMENT CONFIGURATION =====
+        # Environment Configuration
+        $TargetEnvironment = "${{ parameters.targetEnvironment }}"
         switch ($TargetEnvironment.ToUpper().Trim()) {
             "DEV" {
-                $EnvironmentType = "DEVELOPMENT"
                 $WorkspaceId = "$(DevWorkspaceId)"
                 $WorkspaceName = "$(DevWorkspaceName)"
                 $TargetSharePointUrl = "$(DevSharePointUrl)"
                 $TargetGatewayId = "$(DevGatewayId)"
-                $DisplayColor = "Green"
             }
             "UAT" {
-                $EnvironmentType = "UAT"
                 $WorkspaceId = "$(UatWorkspaceId)"
                 $WorkspaceName = "$(UatWorkspaceName)"
                 $TargetSharePointUrl = "$(UatSharePointUrl)"
                 $TargetGatewayId = "$(UatGatewayId)"
-                $DisplayColor = "Yellow"
             }
             "PROD" {
-                $EnvironmentType = "PRODUCTION"
                 $WorkspaceId = "$(ProdWorkspaceId)"
                 $WorkspaceName = "$(ProdWorkspaceName)"
                 $TargetSharePointUrl = "$(ProdSharePointUrl)"
                 $TargetGatewayId = "$(ProdGatewayId)"
-                $DisplayColor = "Red"
-                
-                Write-Host "⚠️  WARNING: DEPLOYING TO PRODUCTION ENVIRONMENT!" -ForegroundColor Red
-                Write-Host "🔴 This will affect live production data!" -ForegroundColor Red
-            }
-            default {
-                Write-Error "❌ Invalid target environment: '$TargetEnvironment'"
-                exit 1
-            }
-        }
-
-        Write-Host "🏢 Target Workspace: $WorkspaceName ($WorkspaceId)" -ForegroundColor $DisplayColor
-        Write-Host ""
-
-        # ===== DISCOVER AVAILABLE REPORTS =====
-        $pbipFolder = "$(BaseFolder)"
-        Write-Host "🔍 Discovering available reports in: $pbipFolder"
-
-        if (!(Test-Path $pbipFolder)) {
-            Write-Error "❌ Base folder not found: $pbipFolder"
-            exit 1
-        }
-
-        # Find all .SemanticModel and .Report folders
-        $allSemanticModels = Get-ChildItem -Path $pbipFolder -Directory | Where-Object { $_.Name -like "*.SemanticModel" }
-        $allReports = Get-ChildItem -Path $pbipFolder -Directory | Where-Object { $_.Name -like "*.Report" }
-
-        $availableProjects = @()
-        foreach ($sm in $allSemanticModels) {
-            $projectBaseName = $sm.Name -replace '\.SemanticModel$', ''
-            $correspondingReport = $allReports | Where-Object { $_.Name -eq "$projectBaseName.Report" }
-            
-            if ($correspondingReport) {
-                $availableProjects += @{
-                    Name = $projectBaseName
-                    SemanticModelPath = $sm.FullName
-                    ReportPath = $correspondingReport.FullName
-                }
-            }
-        }
-
-        Write-Host "📊 Found $($availableProjects.Count) complete Power BI projects:" -ForegroundColor Cyan
-        foreach ($project in $availableProjects) {
-            Write-Host "   • $($project.Name)" -ForegroundColor White
-        }
-        Write-Host ""
-
-        if ($availableProjects.Count -eq 0) {
-            Write-Error "❌ No complete Power BI projects found (need both .SemanticModel and .Report folders)"
-            exit 1
-        }
-
-        # ===== DETERMINE WHICH REPORTS TO DEPLOY =====
-        $reportsToDeployList = @()
-
-        if ($DeploymentMode -eq "ALL") {
-            Write-Host "📋 DEPLOY ALL MODE: Deploying all $($availableProjects.Count) reports" -ForegroundColor Cyan
-            $reportsToDeployList = $availableProjects
-        }
-        elseif ($AutoDetectChanges) {
-            Write-Host "🔍 AUTO-DETECT MODE: Analyzing Git changes..." -ForegroundColor Cyan
-            
-            try {
-                # Get changed files in the last commit or compare with main branch
-                $changedFiles = @()
-                
-                # Try to get files changed in current commit vs previous
-                try {
-                    $changedFiles = git diff --name-only HEAD~1 HEAD 2>$null
-                } catch {
-                    # Fallback: get all files changed vs main/master
-                    try {
-                        $changedFiles = git diff --name-only origin/main HEAD 2>$null
-                    } catch {
-                        try {
-                            $changedFiles = git diff --name-only origin/master HEAD 2>$null
-                        } catch {
-                            Write-Warning "⚠️ Could not detect Git changes, falling back to manual selection"
-                            $changedFiles = @()
-                        }
-                    }
-                }
-                
-                if ($changedFiles.Count -gt 0) {
-                    Write-Host "📝 Found $($changedFiles.Count) changed files:"
-                    $changedFiles | ForEach-Object { Write-Host "   • $_" -ForegroundColor Gray }
-                    
-                    # Find which projects have changes
-                    $changedProjects = @()
-                    foreach ($project in $availableProjects) {
-                        $hasChanges = $false
-                        foreach ($file in $changedFiles) {
-                            if ($file -like "*$($project.Name)*") {
-                                $hasChanges = $true
-                                break
-                            }
-                        }
-                        if ($hasChanges) {
-                            $changedProjects += $project
-                        }
-                    }
-                    
-                    if ($changedProjects.Count -gt 0) {
-                        Write-Host "🎯 Auto-detected $($changedProjects.Count) changed projects:" -ForegroundColor Green
-                        foreach ($project in $changedProjects) {
-                            Write-Host "   ✅ $($project.Name)" -ForegroundColor Green
-                        }
-                        $reportsToDeployList = $changedProjects
-                    } else {
-                        Write-Host "ℹ️ No Power BI projects detected in changed files" -ForegroundColor Yellow
-                    }
-                } else {
-                    Write-Host "ℹ️ No changed files detected" -ForegroundColor Yellow
-                }
-            } catch {
-                Write-Warning "⚠️ Git auto-detection failed: $($_.Exception.Message)"
             }
         }
         
-        # Manual selection (either as primary mode or fallback)
-        if ($DeploymentMode -eq "SELECTIVE" -or ($AutoDetectChanges -and $reportsToDeployList.Count -eq 0)) {
-            Write-Host "📝 SELECTIVE MODE: Manual report selection" -ForegroundColor Cyan
-            
-            if ([string]::IsNullOrWhiteSpace($ReportNamesInput)) {
-                Write-Host ""
-                Write-Host "❌ No reports specified for selective deployment!" -ForegroundColor Red
-                Write-Host ""
-                Write-Host "💡 AVAILABLE OPTIONS:" -ForegroundColor Cyan
-                Write-Host "   1. Specify reports in 'Report Names' parameter:" -ForegroundColor White
-                foreach ($project in $availableProjects) {
-                    Write-Host "      • $($project.Name)" -ForegroundColor Gray
-                }
-                Write-Host ""
-                Write-Host "   2. Example: Sales1,Sales5,Sales10" -ForegroundColor Yellow
-                Write-Host "   3. Or change Deployment Mode to 'ALL'" -ForegroundColor Yellow
-                Write-Host "   4. Or enable 'Auto-detect changed reports'" -ForegroundColor Yellow
-                exit 1
-            }
-            
-            # Parse report names
-            $requestedReports = $ReportNamesInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-            
-            Write-Host "📋 Requested reports: $($requestedReports -join ', ')" -ForegroundColor White
-            
-            # Validate and find matching projects
-            $foundReports = @()
-            $missingReports = @()
-            
-            foreach ($reportName in $requestedReports) {
-                $matchedProject = $availableProjects | Where-Object { $_.Name -eq $reportName }
-                if ($matchedProject) {
-                    $foundReports += $matchedProject
-                    Write-Host "   ✅ $reportName - Found" -ForegroundColor Green
-                } else {
-                    $missingReports += $reportName
-                    Write-Host "   ❌ $reportName - Not Found" -ForegroundColor Red
-                }
-            }
-            
-            if ($missingReports.Count -gt 0) {
-                Write-Host ""
-                Write-Host "❌ Missing reports: $($missingReports -join ', ')" -ForegroundColor Red
-                Write-Host "💡 Available reports:" -ForegroundColor Cyan
-                foreach ($project in $availableProjects) {
-                    Write-Host "   • $($project.Name)" -ForegroundColor White
-                }
-                exit 1
-            }
-            
-            $reportsToDeployList = $foundReports
-        }
-
-        # Final validation
-        if ($reportsToDeployList.Count -eq 0) {
-            Write-Host "❌ No reports selected for deployment!" -ForegroundColor Red
-            exit 1
-        }
-
-        Write-Host ""
-        Write-Host "🚀 DEPLOYMENT SUMMARY" -ForegroundColor Cyan
-        Write-Host "=" * 50 -ForegroundColor Cyan
-        Write-Host "📊 Reports to deploy: $($reportsToDeployList.Count)" -ForegroundColor $DisplayColor
-        foreach ($report in $reportsToDeployList) {
-            Write-Host "   • $($report.Name)" -ForegroundColor $DisplayColor
-        }
-        Write-Host "🎯 Target: $EnvironmentType ($WorkspaceName)" -ForegroundColor $DisplayColor
-        Write-Host "=" * 50 -ForegroundColor Cyan
-        Write-Host ""
-
-        # ===== AUTHENTICATION =====
-        Write-Host "🔐 Authenticating with Fabric API..."
-        
+        Write-Host "🔐 Setting up authentication..."
         $currentPath = (Split-Path $MyInvocation.MyCommand.Definition -Parent)
         Set-Location $currentPath
 
@@ -311,297 +104,196 @@ steps:
         Import-Module Az.Accounts -Force
         Import-Module (Join-Path $moduleFolder "FabricPS-PBIP.psd1") -Force
 
-        Set-FabricAuthToken `
-          -servicePrincipalId "$(ClientId)" `
-          -servicePrincipalSecret "$(ClientSecret)" `
-          -tenantId "$(TenantId)" `
-          -reset
+        Set-FabricAuthToken -servicePrincipalId "$(ClientId)" -servicePrincipalSecret "$(ClientSecret)" -tenantId "$(TenantId)" -reset
 
-        # Get REST API access token
+        # Export environment variables for next steps
+        Write-Host "##vso[task.setvariable variable=CurrentWorkspaceId]$WorkspaceId"
+        Write-Host "##vso[task.setvariable variable=CurrentWorkspaceName]$WorkspaceName"
+        Write-Host "##vso[task.setvariable variable=CurrentSharePointUrl]$TargetSharePointUrl"
+        Write-Host "##vso[task.setvariable variable=CurrentGatewayId]$TargetGatewayId"
+        
+        Write-Host "✅ Authentication setup completed"
+
+  - task: PowerShell@2
+    displayName: '🔍 Discover and Validate Reports'
+    inputs:
+      targetType: 'inline'
+      pwsh: true
+      script: |
+        $ErrorActionPreference = "Stop"
+        
+        $DeploymentMode = "${{ parameters.deploymentMode }}"
+        $ReportNamesInput = "${{ parameters.reportNames }}"
+        $AutoDetectChanges = [System.Convert]::ToBoolean("${{ parameters.autoDetectChanges }}")
+        
+        Write-Host "🔍 Discovering available reports in: $(BaseFolder)"
+        $pbipFolder = "$(BaseFolder)"
+        
+        if (!(Test-Path $pbipFolder)) {
+            Write-Error "❌ Base folder not found: $pbipFolder"
+            exit 1
+        }
+
+        $allSemanticModels = Get-ChildItem -Path $pbipFolder -Directory | Where-Object { $_.Name -like "*.SemanticModel" }
+        $allReports = Get-ChildItem -Path $pbipFolder -Directory | Where-Object { $_.Name -like "*.Report" }
+
+        $availableProjects = @()
+        foreach ($sm in $allSemanticModels) {
+            $projectBaseName = $sm.Name -replace '\.SemanticModel$', ''
+            $correspondingReport = $allReports | Where-Object { $_.Name -eq "$projectBaseName.Report" }
+            
+            if ($correspondingReport) {
+                $availableProjects += @{
+                    Name = $projectBaseName
+                    SemanticModelPath = $sm.FullName
+                    ReportPath = $correspondingReport.FullName
+                }
+            }
+        }
+
+        Write-Host "📊 Found $($availableProjects.Count) complete Power BI projects"
+        
+        if ($availableProjects.Count -eq 0) {
+            Write-Error "❌ No complete Power BI projects found"
+            exit 1
+        }
+
+        # Determine which reports to deploy
+        $reportsToDeployList = @()
+        
+        if ($DeploymentMode -eq "ALL") {
+            $reportsToDeployList = $availableProjects
+        } elseif ($DeploymentMode -eq "SELECTIVE") {
+            $requestedReports = $ReportNamesInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+            
+            foreach ($reportName in $requestedReports) {
+                $matchedProject = $availableProjects | Where-Object { $_.Name -eq $reportName }
+                if ($matchedProject) {
+                    $reportsToDeployList += $matchedProject
+                } else {
+                    Write-Error "❌ Report not found: $reportName"
+                    exit 1
+                }
+            }
+        }
+
+        # Export report list for deployment step
+        $reportsList = ($reportsToDeployList | ConvertTo-Json -Compress)
+        Write-Host "##vso[task.setvariable variable=ReportsToDeployJson]$reportsList"
+        
+        Write-Host "✅ Found $($reportsToDeployList.Count) reports to deploy"
+
+  - task: PowerShell@2
+    displayName: '🚀 Deploy Reports'
+    inputs:
+      targetType: 'inline'
+      pwsh: true
+      script: |
+        $ErrorActionPreference = "Stop"
+        
+        # Get access token
         $body = @{
             grant_type    = "client_credentials"
             client_id     = "$(ClientId)"
             client_secret = "$(ClientSecret)"
             scope         = "https://analysis.windows.net/powerbi/api/.default"
         }
-        $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token" `
-            -Method POST -Body $body
+        $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token" -Method POST -Body $body
         $accessToken = $tokenResponse.access_token
 
-        # ===== PRE-DEPLOYMENT VALIDATION =====
-        Write-Host "🔍 Pre-deployment validation..." -ForegroundColor Cyan
+        # Import FabricPS module
+        $moduleFolder = ".\module"
+        Import-Module (Join-Path $moduleFolder "FabricPS-PBIP.psd1") -Force
+        Set-FabricAuthToken -servicePrincipalId "$(ClientId)" -servicePrincipalSecret "$(ClientSecret)" -tenantId "$(TenantId)" -reset
 
-        # Test SharePoint URL accessibility
-        Write-Host "🌐 Testing SharePoint URL accessibility..." -ForegroundColor White
-        try {
-            $headers = @{ "Authorization" = "Bearer $accessToken" }
-            $testResponse = Invoke-WebRequest -Uri $TargetSharePointUrl -Headers $headers -Method Head -UseBasicParsing
-            Write-Host "   ✅ SharePoint URL accessible (Status: $($testResponse.StatusCode))" -ForegroundColor Green
-        } catch {
-            Write-Warning "   ⚠️ SharePoint URL test failed: $($_.Exception.Message)"
-            Write-Host "   📝 This might cause dataset import issues" -ForegroundColor Yellow
-        }
+        # Parse reports to deploy
+        $reportsToDeployList = "$(ReportsToDeployJson)" | ConvertFrom-Json
+        $WorkspaceId = "$(CurrentWorkspaceId)"
+        $TargetSharePointUrl = "$(CurrentSharePointUrl)"
+        $TargetGatewayId = "$(CurrentGatewayId)"
 
-        # Validate workspace access
-        Write-Host "🏢 Validating workspace access..." -ForegroundColor White
-        try {
-            $workspaceUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId"
-            $workspace = Invoke-RestMethod -Uri $workspaceUrl -Headers @{ "Authorization" = "Bearer $accessToken" }
-            Write-Host "   ✅ Workspace accessible: $($workspace.name)" -ForegroundColor Green
-        } catch {
-            Write-Error "   ❌ Cannot access workspace: $($_.Exception.Message)"
-            exit 1
-        }
-
-        # ===== DEPLOY SELECTED REPORTS =====
         $successfulDeployments = @()
         $failedDeployments = @()
 
         foreach ($project in $reportsToDeployList) {
             Write-Host ""
             Write-Host "🚀 Deploying: $($project.Name)" -ForegroundColor Cyan
-            Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
             
             try {
-                # Validate PBIP structure
-                Write-Host "📋 Validating PBIP structure..." -ForegroundColor White
-                
-                $definitionJson = Join-Path $project.SemanticModelPath "definition.pbidataset"
-                $reportJson = Join-Path $project.ReportPath "definition.pbireport"
-                
-                if (!(Test-Path $definitionJson)) {
-                    throw "Missing definition.pbidataset in SemanticModel folder"
-                }
-                if (!(Test-Path $reportJson)) {
-                    throw "Missing definition.pbireport in Report folder"
-                }
-                
-                Write-Host "   ✅ PBIP structure validated" -ForegroundColor Green
-
-                # Import Semantic Model with enhanced monitoring
+                # Import Semantic Model
                 Write-Host "📥 Importing Semantic Model..." -ForegroundColor White
+                $semanticModelImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.SemanticModelPath
+                Write-Host "✅ Semantic Model ID: $($semanticModelImport.Id)" -ForegroundColor Green
+
+                # Wait for dataset availability
+                Start-Sleep -Seconds 30
                 
-                $importStartTime = Get-Date
-                $semanticModelImport = $null
-                
+                # Take ownership of dataset
+                $takeoverUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.TakeOver"
                 try {
-                    $semanticModelImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.SemanticModelPath
-                    Write-Host "   ✅ Semantic Model imported successfully" -ForegroundColor Green
-                    Write-Host "   📊 Semantic Model ID: $($semanticModelImport.Id)" -ForegroundColor Green
+                    Invoke-RestMethod -Uri $takeoverUrl -Method POST -Headers @{ "Authorization" = "Bearer $accessToken"; "Content-Type" = "application/json" }
+                    Write-Host "✅ Dataset ownership acquired" -ForegroundColor Green
                 } catch {
-                    $importError = $_.Exception.Message
-                    Write-Host "   ❌ Semantic Model import failed: $importError" -ForegroundColor Red
-                    
-                    # Enhanced error analysis
-                    if ($importError -like "*Dataset_Import_FailedToImportDataset*") {
-                        Write-Host "   🔍 ANALYSIS: Dataset import failed - likely causes:" -ForegroundColor Yellow
-                        Write-Host "      • Data source connectivity issues" -ForegroundColor Yellow
-                        Write-Host "      • Authentication/permission problems" -ForegroundColor Yellow
-                        Write-Host "      • Invalid data structure or schema" -ForegroundColor Yellow
-                        Write-Host "      • SharePoint file not accessible or corrupted" -ForegroundColor Yellow
-                        
-                        # Check if we can read the dataset definition
-                        try {
-                            $datasetDef = Get-Content $definitionJson -Raw | ConvertFrom-Json
-                            Write-Host "   📋 Dataset definition contains:" -ForegroundColor Gray
-                            if ($datasetDef.model.dataSources) {
-                                foreach ($ds in $datasetDef.model.dataSources) {
-                                    Write-Host "      • DataSource: $($ds.type) - $($ds.connectionDetails.address)" -ForegroundColor Gray
-                                }
-                            }
-                        } catch {
-                            Write-Host "   ⚠️ Could not read dataset definition for analysis" -ForegroundColor Yellow
-                        }
-                    }
-                    
-                    throw $importError
+                    Write-Warning "⚠️ Could not take ownership: $($_.Exception.Message)"
                 }
 
-                # Wait for dataset to be fully available before proceeding
-                Write-Host "⏳ Waiting for dataset to be available..." -ForegroundColor White
-                $maxWaitTime = 300 # 5 minutes
-                $waitInterval = 10
-                $totalWaited = 0
-                
-                do {
-                    Start-Sleep -Seconds $waitInterval
-                    $totalWaited += $waitInterval
-                    
-                    try {
-                        $datasetUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)"
-                        $dataset = Invoke-RestMethod -Uri $datasetUrl -Headers @{ "Authorization" = "Bearer $accessToken" }
-                        
-                        if ($dataset -and $dataset.id) {
-                            Write-Host "   ✅ Dataset is available and ready" -ForegroundColor Green
-                            break
-                        }
-                    } catch {
-                        if ($totalWaited -ge $maxWaitTime) {
-                            throw "Dataset did not become available within $maxWaitTime seconds"
-                        }
-                        Write-Host "   ⏳ Still waiting... ($totalWaited/$maxWaitTime seconds)" -ForegroundColor Gray
-                    }
-                } while ($totalWaited -lt $maxWaitTime)
-
-                # Configure datasources BEFORE importing report
+                # Configure datasources
                 Write-Host "🔗 Configuring datasources..." -ForegroundColor White
                 $datasourcesUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/datasources"
                 
                 try {
-                    $datasources = Invoke-RestMethod -Uri $datasourcesUrl -Method GET -Headers @{
-                        "Authorization" = "Bearer $accessToken"
-                    }
-                    
-                    $sharePointDatasources = $datasources.value | Where-Object { 
-                        $_.datasourceType -in @("SharePointList", "SharePointFolder", "SharePointOnlineList") 
-                    }
+                    $datasources = Invoke-RestMethod -Uri $datasourcesUrl -Method GET -Headers @{ "Authorization" = "Bearer $accessToken" }
+                    $sharePointDatasources = $datasources.value | Where-Object { $_.datasourceType -in @("SharePointList", "SharePointFolder", "SharePointOnlineList") }
                     
                     if ($sharePointDatasources.Count -gt 0) {
-                        Write-Host "   🔄 Updating $($sharePointDatasources.Count) SharePoint datasource(s)..." -ForegroundColor White
+                        $updateUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.UpdateDatasources"
                         
-                        # Update datasources one by one
                         foreach ($spDs in $sharePointDatasources) {
-                            try {
-                                # Use the takeover approach for better reliability
-                                $takeoverUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.TakeOver"
-                                
-                                Invoke-RestMethod -Uri $takeoverUrl -Method POST -Headers @{
-                                    "Authorization" = "Bearer $accessToken"
-                                    "Content-Type" = "application/json"
-                                }
-                                
-                                Write-Host "      ✅ Dataset ownership taken over" -ForegroundColor Green
-                                
-                                # Now update the datasource
-                                $updateUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.UpdateDatasources"
-                                
-                                $updateBody = @{
-                                    updateDetails = @(
-                                        @{
-                                            datasourceSelector = @{
-                                                datasourceType = $spDs.datasourceType
-                                                connectionDetails = $spDs.connectionDetails
-                                            }
-                                            connectionDetails = @{ 
-                                                url = $TargetSharePointUrl 
-                                            }
-                                            credentialDetails = @{
-                                                credentialType = "OAuth2"
-                                                credentials = $accessToken
-                                                privacyLevel = "Organizational"
-                                            }
+                            $updateBody = @{
+                                updateDetails = @(
+                                    @{
+                                        datasourceSelector = @{
+                                            datasourceType = $spDs.datasourceType
+                                            connectionDetails = $spDs.connectionDetails
                                         }
-                                    )
-                                } | ConvertTo-Json -Depth 10
+                                        connectionDetails = @{ url = $TargetSharePointUrl }
+                                        credentialDetails = @{
+                                            credentialType = "OAuth2"
+                                            credentials = $accessToken
+                                            privacyLevel = "Organizational"
+                                        }
+                                    }
+                                )
+                            } | ConvertTo-Json -Depth 10
 
-                                Invoke-RestMethod -Uri $updateUrl -Method POST -Headers @{
-                                    "Authorization" = "Bearer $accessToken"
-                                    "Content-Type" = "application/json"
-                                } -Body $updateBody
-                                
-                                Write-Host "      ✅ Datasource updated: $($spDs.datasourceType)" -ForegroundColor Green
-                                
-                            } catch {
-                                Write-Warning "      ⚠️ Datasource update failed: $($_.Exception.Message)"
-                                # Continue with other datasources
-                            }
+                            Invoke-RestMethod -Uri $updateUrl -Method POST -Headers @{ "Authorization" = "Bearer $accessToken"; "Content-Type" = "application/json" } -Body $updateBody
+                            Write-Host "✅ Datasource updated: $($spDs.datasourceType)" -ForegroundColor Green
                         }
-                        
-                        # Gateway binding (if configured)
-                        if ($TargetGatewayId -and $TargetGatewayId -ne "" -and $TargetGatewayId -notlike "*your-*-gateway-id-here*") {
-                            Write-Host "   🌐 Binding to gateway..." -ForegroundColor White
-                            try {
-                                $gatewayBindUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.BindToGateway"
-                                $gatewayBindBody = @{
-                                    gatewayObjectId = $TargetGatewayId
-                                } | ConvertTo-Json
-
-                                Invoke-RestMethod -Uri $gatewayBindUrl -Method POST -Headers @{
-                                    "Authorization" = "Bearer $accessToken"
-                                    "Content-Type" = "application/json"
-                                } -Body $gatewayBindBody
-                                
-                                Write-Host "      ✅ Gateway binding successful" -ForegroundColor Green
-                            } catch {
-                                Write-Warning "      ⚠️ Gateway binding failed: $($_.Exception.Message)"
-                            }
-                        }
-                        
-                    } else {
-                        Write-Host "   📋 No SharePoint datasources to configure" -ForegroundColor Gray
                     }
                 } catch {
-                    Write-Warning "   ⚠️ Could not configure datasources: $($_.Exception.Message)"
-                }
-
-                # Test data refresh before importing report
-                Write-Host "🔄 Testing dataset refresh..." -ForegroundColor White
-                try {
-                    $refreshUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/refreshes"
-                    
-                    # Start refresh
-                    Invoke-RestMethod -Uri $refreshUrl -Method POST -Headers @{
-                        "Authorization" = "Bearer $accessToken"
-                        "Content-Type" = "application/json"
-                    }
-                    
-                    # Monitor refresh status
-                    $refreshWaitTime = 0
-                    $maxRefreshWait = 120 # 2 minutes for initial test
-                    
-                    do {
-                        Start-Sleep -Seconds 10
-                        $refreshWaitTime += 10
-                        
-                        $refreshStatus = Invoke-RestMethod -Uri $refreshUrl -Headers @{ "Authorization" = "Bearer $accessToken" }
-                        $latestRefresh = $refreshStatus.value | Select-Object -First 1
-                        
-                        if ($latestRefresh.status -eq "Completed") {
-                            Write-Host "   ✅ Dataset refresh completed successfully" -ForegroundColor Green
-                            break
-                        } elseif ($latestRefresh.status -eq "Failed") {
-                            throw "Dataset refresh failed: $($latestRefresh.serviceExceptionJson)"
-                        }
-                        
-                        Write-Host "   ⏳ Refresh in progress... ($refreshWaitTime/$maxRefreshWait seconds)" -ForegroundColor Gray
-                        
-                    } while ($refreshWaitTime -lt $maxRefreshWait -and $latestRefresh.status -eq "Unknown")
-                    
-                    if ($latestRefresh.status -ne "Completed" -and $refreshWaitTime -ge $maxRefreshWait) {
-                        Write-Warning "   ⚠️ Refresh is taking longer than expected, proceeding with report import"
-                    }
-                    
-                } catch {
-                    Write-Warning "   ⚠️ Dataset refresh test failed: $($_.Exception.Message)"
-                    Write-Host "   📝 Proceeding with report import, but data may not be current" -ForegroundColor Yellow
+                    Write-Warning "⚠️ Datasource configuration failed: $($_.Exception.Message)"
                 }
 
                 # Import Report
-                Write-Host "📄 Importing Report and binding to Semantic Model..." -ForegroundColor White
-                try {
-                    $reportImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.ReportPath -itemProperties @{
-                        "semanticModelId" = $semanticModelImport.Id
-                    }
-                    Write-Host "   ✅ Report imported successfully" -ForegroundColor Green
-                    Write-Host "   📊 Report ID: $($reportImport.Id)" -ForegroundColor Green
-                } catch {
-                    Write-Warning "   ⚠️ Report import failed: $($_.Exception.Message)"
-                    Write-Host "   📝 Semantic model was imported successfully, you can manually create the report" -ForegroundColor Yellow
-                    # Don't throw here, partial success is still valuable
-                }
+                Write-Host "📄 Importing Report..." -ForegroundColor White
+                $reportImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.ReportPath -itemProperties @{ "semanticModelId" = $semanticModelImport.Id }
+                Write-Host "✅ Report ID: $($reportImport.Id)" -ForegroundColor Green
 
                 $successfulDeployments += $project.Name
                 Write-Host "✅ $($project.Name) - DEPLOYMENT SUCCESSFUL" -ForegroundColor Green
 
             } catch {
-                $failedDeployments += @{
-                    Name = $project.Name
-                    Error = $_.Exception.Message
-                }
+                $failedDeployments += @{ Name = $project.Name; Error = $_.Exception.Message }
                 Write-Host "❌ $($project.Name) - DEPLOYMENT FAILED: $($_.Exception.Message)" -ForegroundColor Red
-                
-                # Additional troubleshooting info
-                Write-Host "🔍 TROUBLESHOOTING STEPS:" -ForegroundColor Yellow
-                Write-Host "   1. Verify SharePoint file exists and is accessible: $TargetSharePointUrl" -ForegroundColor Yellow
-                Write-Host "   2. Check service principal permissions on SharePoint site" -ForegroundColor Yellow
-                Write-Host "   3. Ensure workspace has proper permissions for the service principal
+            }
+        }
+
+        # Final Summary
+        Write-Host ""
+        Write-Host "🎉 DEPLOYMENT SUMMARY" -ForegroundColor Cyan
+        Write-Host "✅ Successful: $($successfulDeployments.Count)" -ForegroundColor Green
+        Write-Host "❌ Failed: $($failedDeployments.Count)" -ForegroundColor Red
+        
+        if ($failedDeployments.Count -gt 0) {
+            exit 1
+        }
