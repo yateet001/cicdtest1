@@ -14,7 +14,7 @@ variables:
   # Set this variable when triggering the pipeline to control deployment target
   # Options: 'DEV', 'UAT', 'PROD'
   # Default: 'DEV' (if not specified)
-  TargetEnvironment: 'DEV'
+  TargetEnvironment: 'PROD'
   
   # Environment Configuration
   DevWorkspaceId: 'b42dfb7f-667e-48f9-97c9-12198c700e09'
