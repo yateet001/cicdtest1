@@ -163,8 +163,7 @@ steps:
         
         if ($DeploymentMode -eq "ALL") {
             $reportsToDeployList = $availableProjects
-        } else        # Also based on your folder structure, let's match reports correctly
-        if ($DeploymentMode -eq "SELECTIVE") {
+        } else if ($DeploymentMode -eq "SELECTIVE") {
             $requestedReports = $ReportNamesInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
             
             foreach ($reportName in $requestedReports) {
