@@ -171,9 +171,9 @@ steps:
 
         Write-Host "✅ Reports ready for deployment: $($reportsToDeployList.Count)"
 
-  # Step 4: Deploy reports
+  # Step 4: Pre-deployment checks and data source updates
   - task: PowerShell@2
-    displayName: '🚀 Deploy Reports'
+    displayName: '🔧 Pre-deployment Data Source Configuration'
     inputs:
       targetType: 'inline'
       pwsh: true
@@ -182,6 +182,7 @@ steps:
 
         Import-Module "$(ModuleFolder)/FabricPS-PBIP.psd1" -Force
 
+        # Get OAuth token for Power BI REST API calls
         $body = @{
             grant_type    = "client_credentials"
             client_id     = "$(ClientId)"
@@ -191,17 +192,171 @@ steps:
         $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$(TenantId)/oauth2/v2.0/token" -Method POST -Body $body
         $accessToken = $tokenResponse.access_token
 
+        Write-Host "✅ Power BI REST API token obtained"
+
+        # Decode reports list
         $reportsListJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("$(ReportsToDeployBase64)"))
         $reportsToDeployList = $reportsListJson | ConvertFrom-Json
         $WorkspaceId = "$(CurrentWorkspaceId)"
+        $TargetSharePointUrl = "$(CurrentSharePointUrl)"
+        $TargetGatewayId = "$(CurrentGatewayId)"
+
+        Write-Host "🔍 Pre-deployment checks for $($reportsToDeployList.Count) reports"
+        Write-Host "📍 Target SharePoint URL: $TargetSharePointUrl"
+        Write-Host "🌉 Target Gateway ID: $TargetGatewayId"
+
+        # Store variables for next step
+        Write-Host "##vso[task.setvariable variable=PowerBIAccessToken]$accessToken"
+
+  # Step 5: Deploy reports with enhanced error handling
+  - task: PowerShell@2
+    displayName: '🚀 Deploy Reports with Data Source Updates'
+    inputs:
+      targetType: 'inline'
+      pwsh: true
+      script: |
+        $ErrorActionPreference = "Continue"  # Changed to Continue for better error handling
+
+        Import-Module "$(ModuleFolder)/FabricPS-PBIP.psd1" -Force
+
+        $accessToken = "$(PowerBIAccessToken)"
+        $headers = @{ 'Authorization' = "Bearer $accessToken"; 'Content-Type' = 'application/json' }
+
+        $reportsListJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("$(ReportsToDeployBase64)"))
+        $reportsToDeployList = $reportsListJson | ConvertFrom-Json
+        $WorkspaceId = "$(CurrentWorkspaceId)"
+        $TargetSharePointUrl = "$(CurrentSharePointUrl)"
+        $TargetGatewayId = "$(CurrentGatewayId)"
+
+        $deploymentResults = @()
 
         foreach ($project in $reportsToDeployList) {
-            Write-Host "📥 Importing Semantic Model: $($project.Name)"
-            $semanticModelImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.SemanticModelPath
-            Start-Sleep -Seconds 20
+            Write-Host "🔄 Processing: $($project.Name)"
+            $deploymentSuccess = $false
+            
+            try {
+                # Step 1: Import Semantic Model
+                Write-Host "📥 Importing Semantic Model: $($project.Name)"
+                $semanticModelImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.SemanticModelPath
+                
+                if ($semanticModelImport -and $semanticModelImport.Id) {
+                    Write-Host "✅ Semantic Model imported successfully. ID: $($semanticModelImport.Id)"
+                    
+                    # Wait for import to complete
+                    Write-Host "⏳ Waiting for semantic model to be ready..."
+                    Start-Sleep -Seconds 30
+                    
+                    # Step 2: Update Data Sources (this is the key fix for your error)
+                    Write-Host "🔧 Updating data sources for semantic model..."
+                    
+                    try {
+                        # Get current data sources
+                        $dataSourcesUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/datasources"
+                        $currentDataSources = Invoke-RestMethod -Uri $dataSourcesUrl -Method GET -Headers $headers
+                        
+                        Write-Host "📊 Found $($currentDataSources.value.Count) data source(s)"
+                        
+                        # Update SharePoint data source if exists
+                        foreach ($dataSource in $currentDataSources.value) {
+                            if ($dataSource.datasourceType -eq "SharePointList" -or $dataSource.connectionDetails.url -like "*sharepoint*") {
+                                Write-Host "🔄 Updating SharePoint data source..."
+                                
+                                $updateBody = @{
+                                    updateDetails = @(
+                                        @{
+                                            datasourceSelector = @{
+                                                datasourceType = $dataSource.datasourceType
+                                                connectionDetails = $dataSource.connectionDetails
+                                            }
+                                            connectionDetails = @{
+                                                url = $TargetSharePointUrl
+                                            }
+                                        }
+                                    )
+                                } | ConvertTo-Json -Depth 10
+                                
+                                $updateUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.UpdateDatasources"
+                                Invoke-RestMethod -Uri $updateUrl -Method POST -Body $updateBody -Headers $headers
+                                Write-Host "✅ SharePoint data source updated"
+                            }
+                        }
+                        
+                        # Step 3: Update Gateway (if needed)
+                        if ($TargetGatewayId -ne "00000000-0000-0000-0000-000000000000") {
+                            Write-Host "🌉 Binding to gateway: $TargetGatewayId"
+                            
+                            $gatewayBody = @{
+                                gatewayObjectId = $TargetGatewayId
+                            } | ConvertTo-Json
+                            
+                            $gatewayUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/Default.BindToGateway"
+                            Invoke-RestMethod -Uri $gatewayUrl -Method POST -Body $gatewayBody -Headers $headers
+                            Write-Host "✅ Gateway binding completed"
+                        }
+                        
+                    } catch {
+                        Write-Warning "⚠️ Data source update failed: $($_.Exception.Message)"
+                        Write-Host "🔄 Continuing with report import..."
+                    }
+                    
+                    # Step 4: Refresh the dataset to test connections
+                    Write-Host "🔄 Refreshing dataset to validate connections..."
+                    try {
+                        $refreshUrl = "https://api.powerbi.com/v1.0/myorg/groups/$WorkspaceId/datasets/$($semanticModelImport.Id)/refreshes"
+                        $refreshBody = @{ notifyOption = "NoNotification" } | ConvertTo-Json
+                        Invoke-RestMethod -Uri $refreshUrl -Method POST -Body $refreshBody -Headers $headers
+                        Write-Host "✅ Dataset refresh initiated"
+                    } catch {
+                        Write-Warning "⚠️ Dataset refresh failed: $($_.Exception.Message)"
+                    }
+                    
+                    # Wait a bit more before report import
+                    Start-Sleep -Seconds 20
+                    
+                    # Step 5: Import Report
+                    Write-Host "📄 Importing Report: $($project.Name)"
+                    $reportImport = Import-FabricItem -workspaceId $WorkspaceId -path $project.ReportPath -itemProperties @{ "semanticModelId" = $semanticModelImport.Id }
+                    
+                    if ($reportImport) {
+                        Write-Host "✅ Report imported successfully"
+                        $deploymentSuccess = $true
+                    }
+                    
+                } else {
+                    Write-Error "❌ Failed to import semantic model"
+                }
+                
+            } catch {
+                Write-Error "❌ Deployment failed for $($project.Name): $($_.Exception.Message)"
+                Write-Host "🔍 Full error details: $($_.Exception)"
+                
+                # Continue with next report instead of failing entire pipeline
+            }
+            
+            $deploymentResults += @{
+                ProjectName = $project.Name
+                Success = $deploymentSuccess
+                Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            }
+        }
 
-            Write-Host "📄 Importing Report: $($project.Name)"
-            Import-FabricItem -workspaceId $WorkspaceId -path $project.ReportPath -itemProperties @{ "semanticModelId" = $semanticModelImport.Id }
-
-            Write-Host "✅ Deployment complete for: $($project.Name)"
+        # Summary
+        Write-Host "`n📊 Deployment Summary:"
+        $successCount = ($deploymentResults | Where-Object { $_.Success }).Count
+        $totalCount = $deploymentResults.Count
+        
+        Write-Host "✅ Successful deployments: $successCount/$totalCount"
+        
+        foreach ($result in $deploymentResults) {
+            $status = if ($result.Success) { "✅ SUCCESS" } else { "❌ FAILED" }
+            Write-Host "  - $($result.ProjectName): $status"
+        }
+        
+        if ($successCount -eq 0 -and $totalCount -gt 0) {
+            Write-Host "##vso[task.logissue type=error]All deployments failed"
+            exit 1
+        } elseif ($successCount -lt $totalCount) {
+            Write-Host "##vso[task.logissue type=warning]Some deployments failed"
+        } else {
+            Write-Host "🎉 All deployments completed successfully!"
         }
