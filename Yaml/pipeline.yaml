@@ -30,7 +30,7 @@ variables:
   ProdWorkspaceId: 'cb0a4bb8-e16a-4886-b803-4dcceda22cd0'
   ProdWorkspaceName: 'VISACICDProd'
   ProdSharePointUrl: 'https://testmaq.sharepoint.com/sites/VisaTest/Shared%20Documents/Prod/SalesDashboard.xlsx '
-  ProdGatewayId: 'fc18f7e5-c9c2-4aa7-98db-ba8512248936'
+  ProdGatewayId: '757a32db-a93c-4516-9f43-da8968e99aac'
 
 steps:
   - task: PowerShell@2
