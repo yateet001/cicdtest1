@@ -163,7 +163,7 @@ steps:
         
         if ($DeploymentMode -eq "ALL") {
             $reportsToDeployList = $availableProjects
-        } else if ($DeploymentMode -eq "SELECTIVE") {
+        } elseif ($DeploymentMode -eq "SELECTIVE") {
             $requestedReports = $ReportNamesInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
             
             foreach ($reportName in $requestedReports) {
