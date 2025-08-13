@@ -25,14 +25,21 @@ jobs:
   # Step 2: Install Power BI Desktop (for PBIP to PBIX conversion)
   - task: PowerShell@2
     displayName: 'Install Power BI Desktop'
-    inputs:
-      targetType: 'inline'
-      script: |
-        # Ensure Power BI Desktop is installed for PBIP to PBIX conversion
-        $powerBIDesktopPath = "C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe"
-        if (-not (Test-Path $powerBIDesktopPath)) {
-            throw "Power BI Desktop is not installed. Please install it and try again."
-        }
+  inputs:
+    targetType: 'inline'
+    script: |
+      # Download Power BI Desktop installer
+      $installerUrl = "https://aka.ms/pbidesktop"
+      $installerPath = "C:\temp\PBIDesktopSetup.exe"
+
+      Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
+      Start-Process -FilePath $installerPath -ArgumentList "/quiet /norestart" -Wait
+
+      # Ensure Power BI Desktop is installed
+      $powerBIDesktopPath = "C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe"
+      if (-not (Test-Path $powerBIDesktopPath)) {
+          throw "Power BI Desktop is not installed. Please check the installation."
+      }
 
   # Step 3: Run the PowerShell script to convert PBIP to PBIX and deploy the reports
   - task: PowerShell@2
