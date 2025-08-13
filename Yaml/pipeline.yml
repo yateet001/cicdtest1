@@ -107,7 +107,33 @@ jobs:
           Write-Host "Power BI Desktop installation process completed. Pipeline will continue."
         continueOnError: true
 
-    # Step 3: Run the PowerShell script to convert PBIP to PBIX and deploy the reports
+    # Step 3: Install PowerShell Modules
+    - task: PowerShell@2
+      displayName: 'Install Required PowerShell Modules'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Installing required PowerShell modules..."
+          
+          # Set PowerShell execution policy
+          Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+          
+          # Install required modules
+          $modules = @('MicrosoftPowerBIMgmt')
+          
+          foreach ($module in $modules) {
+              Write-Host "Installing module: $module"
+              try {
+                  Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser
+                  Import-Module -Name $module -Force
+                  Write-Host "✓ Module $module installed successfully"
+              } catch {
+                  Write-Warning "Failed to install $module : $_"
+              }
+          }
+        pwsh: true
+
+    # Step 4: Run the PowerShell script to convert PBIP to PBIX and deploy the reports
     - task: PowerShell@2
       displayName: 'Run PowerShell Script to Deploy Reports'
       inputs:
@@ -117,7 +143,7 @@ jobs:
         pwsh: true  # Use PowerShell Core (pwsh)
         workingDirectory: '$(Build.SourcesDirectory)'  # Set the script working directory to root of the repository
 
-    # Step 4: Publish build artifacts (optional step, if you want to store outputs like PBIX files)
+    # Step 5: Publish build artifacts (optional step, if you want to store outputs like PBIX files)
     - task: PublishBuildArtifacts@1
       displayName: 'Publish Artifacts'
       inputs:

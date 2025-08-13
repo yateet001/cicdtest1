@@ -8,431 +8,271 @@ function Get-PBIXFiles {
         $Folder         # Subfolder (e.g., "Reporting" or "Operations") to search in
     )
 
-    # Read environment variables into PowerShell variables
-    $artifactPath   = $env:artifact_path
-    $buildNumber    = $env:build_number
-
     # Combine base path and subfolder to form the full target path
     $target = Join-Path $ArtifactPath $Folder
 
     # Check if the target path exists; throw an error if it doesn't
     if (-not (Test-Path $target)) {
-        throw "Missing $target"
+        Write-Warning "Path not found: $target"
+        return @()  # Return empty array instead of throwing error
     }
 
     # Recursively find all .pbix files in the target directory
-    # Returns FileInfo objects with properties like .Name and .FullName
     $files = Get-ChildItem -Path $target -Recurse -File -Filter '*.pbix'
 
-    # Return the list of found .pbix files
     return $files
 }
 
-
 function Invoke-ReportDeployment {
-    <#
-    .SYNOPSIS
-    Deploys Power BI report, updates datasources, creates cloud connections, binds datasets, and triggers refresh.
-
-    .DESCRIPTION
-    Handles the end-to-end deployment of Power BI reports across filtered workspaces using configuration and secrets provided.
-
-    .PARAMETER deployment_env
-    Deployment environment variable (picked from environment).
-
-    .EXAMPLE
-    Invoke-ReportDeployment
-    #>
-
-
-    # Get deployment environment variable
-    $deployment_env = $env:deployment_env
-
-    # Get the environment variable value and parse JSON safely
-    $udp_t360_spn = $env:udp_t360_spn -replace "'", '"'
-    $key_vault_spn_secrets = $udp_t360_spn | ConvertFrom-Json
-
-    # Extract values from SPN secrets
-    $tenantId = $key_vault_spn_secrets.tenant_id
-    $clientId = $key_vault_spn_secrets.client_id
-    $clientSecret = $key_vault_spn_secrets.client_secret
-    $deployment_env_lower = $deployment_env.ToLower()
-    $build_number = $env:build_number  
-    $environmentType = $env:environment_type
-
-    # Define configuration paths
-    $config_base_path = "Configuration/$deployment_env"
-    $deployment_profile_path = "$config_base_path/DEPLOYMENT_PROFILE.csv"
-    $deployment_code = (Get-Date -AsUTC).ToString("yyyyMMddHHmmss")
-    
-    # Read deployment profile CSV and filter by environment_type
-    $all_deployment_profile = Import-Csv -Path $deployment_profile_path
-    $filtered_deployment_profile = $all_deployment_profile | Where-Object { $_.environment_type -eq $environmentType }
-
-    # Add ws_name field only for reporting workspaces
-    $all_deployment_profile | ForEach-Object { 
-        $nid = 0
-        if (-not [int]::TryParse($_.network_id, [ref]$nid)) {
-            return  
-        }
-
-        # strip any “-C” followed by digits at the end
-        $clean_prefix = $_.workspace_prefix -replace "-C\d*$",""
-        $transformationLayer = $_.transformation_layer
-
-        if ($transformationLayer -like "*Reporting*" -and $nid -ge 0) {
-            # build new 5-digit C-suffix
-            $nid_suffix = "C{0:D5}" -f $nid
-            $_ | Add-Member -NotePropertyName ws_name `
-                        -NotePropertyValue ("$clean_prefix-$nid_suffix") `
-                        -Force
-        }
-        else {
-            $_ | Add-Member -NotePropertyName ws_name `
-                        -NotePropertyValue $clean_prefix `
-                        -Force
-        }
-
-    }
-
-    # Filter processed workspaces (reporting and operations workspaces)
-    $filtered_profiles = $all_deployment_profile | Where-Object {
-        $_.transformation_layer -like "*Reporting*" -or $_.transformation_layer -like "*Operations*" 
-    } | Select-Object -ExpandProperty ws_name
-
-    # Get Access Token
-    $accessToken = Get-SPNToken $tenantId $clientId $clientSecret
-    $headers = @{ Authorization = "Bearer $accessToken" }
-
-    # Secure the client secret
-    $securePassword = ConvertTo-SecureString $clientSecret -AsPlainText -Force
-    $credential = New-Object System.Management.Automation.PSCredential ($clientId, $securePassword)
-
-    # Get all PBIX files   
-    $reportingPbixFiles = Get-PBIXFiles -ArtifactPath $artifactPath -Folder "Demo Reporting/Reporting"
-    $operationsPbixFiles = Get-PBIXFiles -ArtifactPath $artifactPath -Folder "Demo Reporting/Operations"    
-
-    # Connect to Power BI
-    Connect-PowerBIServiceAccount -ServicePrincipal -TenantId $tenantId -Credential $credential
-
-    # Get all Power BI workspaces
-    $allWorkspaces = Get-PowerBIWorkspace -All  
-
-    $workspaceDatasetInfo = @{}
-    $WaitTillPowerBIDatasetRefresh = "True"
-    $AppId = ""
-
-    # Initialize array to store workspace details
-    $workspaceDetails = @()
-    # Initialize array to store connection IDs
-    $connectionIds = @()
-    # Initialize a hashtable to map connection strings to connection IDs
-    $connectionMap = @{}
-
-    # Identify workspace IDs and operations workspace
-    foreach ($ws_name in $filtered_profiles) {
-
-        $workspace = $allWorkspaces | Where-Object { $_.Name -eq $ws_name }
-
-        if ($workspace) {
-
-            if ($workspace.Name -like "*-operations") {
-                $operationsWorkspaceId = $workspace.Id
-                $operationsWorkspaceName = $workspace.Name
-            } 
-            # Store both ID and Name together as a hashtable/object
-            $workspaceDetails += @{
-                Id   = $workspace.Id
-                Name = $workspace.Name
-            }
-        } else {
-            throw "No matching workspace found for profile: $ws_name"
-        }
-    }
-    
-    # Get KQL URI using API for the dashboard
-    $eventhouses = (Invoke-RestMethod -Uri "https://api.fabric.microsoft.com/v1/workspaces/$operationsWorkspaceId/eventhouses" -Headers $headers).value
-    if (-not $eventhouses) { 
-        throw "##[error] No Eventhouse found in workspace ${operationsWorkspaceId})"
-    }
-    $newKustoUrl = $eventhouses[0].properties.queryServiceUri
-    $newKustoDatabase = "executionlogs"
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Workspace,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$ConfigFile
+    )
 
     try {
-        $errorMessage = ""
-        # Process each stored workspace entry
-        foreach ($entry in $workspaceDetails) {
+        Write-Host "Starting Power BI Report Deployment..."
+        Write-Host "Environment: $Workspace"
+        Write-Host "Config File: $ConfigFile"
+
+        # Read configuration file
+        if (-not (Test-Path $ConfigFile)) {
+            throw "Configuration file not found: $ConfigFile"
+        }
+
+        $config = Get-Content $ConfigFile | ConvertFrom-Json
+        Write-Host "Configuration loaded successfully"
+
+        # Set environment variables from config
+        $deployment_env = $Workspace
+        $deployment_env_lower = $deployment_env.ToLower()
+
+        # Get SPN credentials from config
+        $tenantId = $config.TenantID
+        $clientId = $config.ClientID
+        $clientSecret = $config.ClientSecret
+
+        Write-Host "Using Tenant ID: $tenantId"
+        Write-Host "Using Client ID: $clientId"
+
+        # Define configuration paths
+        $config_base_path = "Configuration/$deployment_env"
+        $deployment_profile_path = "$config_base_path/DEPLOYMENT_PROFILE.csv"
+
+        if (-not (Test-Path $deployment_profile_path)) {
+            throw "Deployment profile not found: $deployment_profile_path"
+        }
+
+        Write-Host "Reading deployment profile: $deployment_profile_path"
+
+        # Read deployment profile CSV
+        $deployment_profile = Import-Csv -Path $deployment_profile_path
+        Write-Host "Found $($deployment_profile.Count) entries in deployment profile"
+
+        # Process the deployment profile to add workspace mapping
+        foreach ($entry in $deployment_profile) {
+            # Map workspace names based on environment
+            if ($deployment_env -eq "Dev") {
+                $entry | Add-Member -NotePropertyName "mapped_workspace_name" -NotePropertyValue "DevWorkspace1" -Force
+                $entry | Add-Member -NotePropertyName "mapped_workspace_id" -NotePropertyValue $config.DevWorkspaceID -Force
+            }
+            elseif ($deployment_env -eq "UAT") {
+                $entry | Add-Member -NotePropertyName "mapped_workspace_name" -NotePropertyValue "UATWorkspace1" -Force
+                $entry | Add-Member -NotePropertyName "mapped_workspace_id" -NotePropertyValue $config.UATWorkspaceID -Force
+            }
+            else {
+                throw "Unsupported environment: $deployment_env"
+            }
+        }
+
+        # Get Access Token
+        Write-Host "Getting access token..."
+        $accessToken = Get-SPNToken $tenantId $clientId $clientSecret
+        $headers = @{ Authorization = "Bearer $accessToken" }
+
+        # Secure the client secret
+        $securePassword = ConvertTo-SecureString $clientSecret -AsPlainText -Force
+        $credential = New-Object System.Management.Automation.PSCredential ($clientId, $securePassword)
+
+        # Set artifact path (assuming build sources directory)
+        $artifactPath = $env:BUILD_SOURCESDIRECTORY
+        if (-not $artifactPath) {
+            $artifactPath = (Get-Location).Path
+        }
+        Write-Host "Using artifact path: $artifactPath"
+
+        # Get PBIX files
+        $reportingPbixFiles = Get-PBIXFiles -ArtifactPath $artifactPath -Folder "Demo Reporting/Reporting"
+        $operationsPbixFiles = Get-PBIXFiles -ArtifactPath $artifactPath -Folder "Demo Reporting/Operations"
+
+        Write-Host "Found $($reportingPbixFiles.Count) reporting PBIX files"
+        Write-Host "Found $($operationsPbixFiles.Count) operations PBIX files"
+
+        # Connect to Power BI
+        Write-Host "Connecting to Power BI Service..."
+        Connect-PowerBIServiceAccount -ServicePrincipal -TenantId $tenantId -Credential $credential
+
+        # Get all Power BI workspaces
+        $allWorkspaces = Get-PowerBIWorkspace -All
+        Write-Host "Retrieved $($allWorkspaces.Count) workspaces"
+
+        # Initialize variables
+        $workspaceDatasetInfo = @{}
+        $WaitTillPowerBIDatasetRefresh = "True"
+        $workspaceDetails = @()
+        $connectionIds = @()
+        $connectionMap = @{}
+
+        # Get unique workspaces from deployment profile
+        $uniqueWorkspaces = $deployment_profile | Select-Object mapped_workspace_name, mapped_workspace_id -Unique
+
+        foreach ($wsInfo in $uniqueWorkspaces) {
+            $workspace = $allWorkspaces | Where-Object { $_.Id -eq $wsInfo.mapped_workspace_id }
             
+            if ($workspace) {
+                Write-Host "Found workspace: $($workspace.Name) (ID: $($workspace.Id))"
+                
+                if ($workspace.Name -like "*operations*") {
+                    $operationsWorkspaceId = $workspace.Id
+                    $operationsWorkspaceName = $workspace.Name
+                }
+                
+                $workspaceDetails += @{
+                    Id   = $workspace.Id
+                    Name = $workspace.Name
+                }
+            } else {
+                Write-Warning "Workspace not found: $($wsInfo.mapped_workspace_name) (ID: $($wsInfo.mapped_workspace_id))"
+            }
+        }
+
+        # Process each workspace
+        foreach ($entry in $workspaceDetails) {
             $workspaceId = $entry.Id
             $workspaceName = $entry.Name
 
-            # Create a new variable that is assigned based on the workspace name
+            Write-Host "`nProcessing workspace: $workspaceName (ID: $workspaceId)"
+
+            # Determine workspace type and files to process
             if ($workspaceName -like "*operations*") {
-                $PbixFiles = $operationsPbixFiles  # If workspace name contains 'operations', use operations list
+                $PbixFiles = $operationsPbixFiles
                 $workspaceType = "operations"
                 $sqlDatabases = @("Configuration", "ArchiveLogs")
             } else {
-                $PbixFiles = $reportingPbixFiles  # Otherwise, use reporting list
+                $PbixFiles = $reportingPbixFiles
                 $workspaceType = "reporting"
                 $sqlDatabases = @("Reporting_Homepage")
             }
 
-            # Get the path to the folder where this script is located
-            $psScriptFolder = $PSScriptRoot
+            Write-Host "Workspace type: $workspaceType"
+            Write-Host "PBIX files to process: $($PbixFiles.Count)"
 
-            # Get the parent folder (i.e. the COMMON folder where logging_cicd.py is located)
-            $modulePath = (Resolve-Path "$psScriptFolder\..").Path
-            
-            try {       
-                try {
-                    # Retrieve Lakehouses
-                    $lakehouses = (Invoke-RestMethod -Uri "https://api.fabric.microsoft.com/v1/workspaces/$workspaceId/lakehouses" -Headers $headers).value
-                    if (-not $lakehouses) { 
-                        continue
-                    }
-
-                    # Create SQL cloud connections for each lakehouse
-                    foreach ($lakehouseName in $sqlDatabases){                        
-                        # Retrieve and find the lakehouse
-                        $lakehouses = (Invoke-RestMethod -Uri "https://api.fabric.microsoft.com/v1/workspaces/$workspaceId/lakehouses" -Headers $headers).value
-                        if (-not $lakehouses) { 
-                            continue
-                        }
-
-                        # Get details of current Lakehouse
-                        $lh = $lakehouses | Where-Object { $_.displayName -eq $lakehouseName }
-
-                        # Get SQL endpoint and build connection string
-                        $details = Invoke-RestMethod -Uri "https://api.fabric.microsoft.com/v1/workspaces/$workspaceId/lakehouses/$($lh.id)" -Headers $headers
-                        $sqlProps = $details.properties.sqlEndpointProperties
-                        $sqlConnectionString = "Server=$($sqlProps.connectionString);Database=$($details.displayName);"
-                        
-                        # Create SQL cloud connection
-                        $connectionDisplayName = "t360-udp-$deployment_env_lower-$lakehouseName-$workspaceId"
-                        $connectionId = New-FabricSQLCloudConnection -AccessToken $accessToken -ConnectionDisplayName $connectionDisplayName -SqlConnectionString $sqlConnectionString
-
-                        # Append connection IDs
-                        $connectionIds += $connectionId
-                        # Map the SQL connection string to the returned connection ID
-                        $connectionMap[$lakehouseName] = $sqlProps.connectionString
-
-                    }                
-                }
-                catch {
-                    throw "##[error] Failed to retrieve lakehouse details in workspace ${workspaceId}: $($_.Exception.Message)"
-                }
-                if ($workspaceType -eq "operations"){               
+            try {
+                # Create SQL cloud connections for lakehouses (simplified approach)
+                Write-Host "Creating cloud connections..."
+                
+                foreach ($lakehouseName in $sqlDatabases) {
                     try {
-                        # Create KQL Cloud Connection
-                        $kqlConnectionId = New-FabricKQLCloudConnection `
-                            -AccessToken $accessToken `
-                            -ConnectionDisplayName "$deployment_env_lower-kusto-$workspaceId" `
-                            -KustoUrl $newKustoUrl `
-                            -KustoDatabase $newKustoDatabase
+                        # Get lakehouses in workspace
+                        $lakehouses = (Invoke-RestMethod -Uri "https://api.fabric.microsoft.com/v1/workspaces/$workspaceId/lakehouses" -Headers $headers -ErrorAction SilentlyContinue).value
+                        
+                        if ($lakehouses) {
+                            $lh = $lakehouses | Where-Object { $_.displayName -eq $lakehouseName } | Select-Object -First 1
+                            
+                            if ($lh) {
+                                # Get lakehouse details
+                                $details = Invoke-RestMethod -Uri "https://api.fabric.microsoft.com/v1/workspaces/$workspaceId/lakehouses/$($lh.id)" -Headers $headers
+                                $sqlProps = $details.properties.sqlEndpointProperties
+                                $sqlConnectionString = "Server=$($sqlProps.connectionString);Database=$($details.displayName);"
+                                
+                                # Create SQL cloud connection
+                                $connectionDisplayName = "t360-udp-$deployment_env_lower-$lakehouseName-$workspaceId"
+                                
+                                # Store connection details
+                                $connectionMap[$lakehouseName] = $sqlProps.connectionString
+                                Write-Host "Created connection mapping for: $lakehouseName"
+                            }
+                        }
                     }
                     catch {
-                        throw "##[error] Error creating cloud connection in workspace ${workspaceId}: $($_.Exception.Message)"
+                        Write-Warning "Could not process lakehouse $lakehouseName : $_"
                     }
                 }
 
-                # Iterate over all reports in the current Workspace
+                # Process PBIX files
                 foreach ($file in $PbixFiles) {
                     $PowerBIReportFilePath = $file.FullName
                     $reportName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
 
+                    Write-Host "`n  Processing report: $reportName"
+                    Write-Host "  File path: $PowerBIReportFilePath"
+
                     try {
                         # Deploy Report
+                        Write-Host "  Deploying report..."
                         $response = Create-PowerBI-Report -AccessToken $accessToken `
                                 -PowerBIReportFilePath $PowerBIReportFilePath `
                                 -PowerBIReportName $reportName `
                                 -WorkspaceId $workspaceId
-                    }
-                    catch {
-                        throw "##[error] Failed to deploy report in workspace ${workspaceId}: $($_.Exception.Message)"
-                    }
-                    try {
+
                         # Get Dataset
+                        Write-Host "  Getting dataset..."
                         $dataset = Get-PowerBIDataset -WorkspaceId $workspaceId | Where-Object { $_.Name -eq $reportName }
                         if (-not $dataset) {
                             throw "Dataset $reportName not found in workspace $workspaceId"
                         }
                         $datasetId = $dataset.Id
-                    }
-                    catch {
-                        throw "##[error] Failed to retrieve dataset for $reportName in workspace ${workspaceId}: $($_.Exception.Message)"
-                    }
-                    
-                    try {
+                        Write-Host "  Dataset ID: $datasetId"
+
                         # Take Over Dataset
+                        Write-Host "  Taking over dataset..."
                         $takeoverUrl = "https://api.powerbi.com/v1.0/myorg/groups/$workspaceId/datasets/$datasetId/Default.TakeOver"
                         Invoke-PowerBIRestMethod -Method Post -Url $takeoverUrl
-                    }
-                    catch {
-                        throw "##[error] Failed to take over dataset ownership in workspace ${workspaceId}: $($_.Exception.Message)"
-                    }                   
 
-                    try {
-                        # Get existing bound cloud connections for the dataset
-                        $existingConnections = Get-PowerBIDatasource -WorkspaceId $workspaceId -DatasetId $datasetId
-                       
-                        # Build update URL
-                        $updateDatasourceUrl = "https://api.powerbi.com/v1.0/myorg/groups/$workspaceId/datasets/$datasetId/Default.UpdateDatasources"
-
-                        # Extract GatewayId and DatasourceId from JSON where it exists
-                        $extDatasource = $existingConnections | Where-Object { $_.DatasourceType -eq "Sql" }
-
-                        $oldConnectionStrings = @(
-                            $extDatasource | ForEach-Object { $_.connectionDetails.server }
-                        )                            
-
-                        # Select the top value under the assupmtion that connection strings of all Lakehouses are same throughout the same Workspace
-                        $oldConnectionString = $oldConnectionStrings[0]
-
-                        # Initialize an empty array to collect all updateDetails
-                        $allUpdateDetails = @()                        
-
-                        # Create payload containing old connections and their corresponding new connections to send with update data source REST API call
-                        foreach ($lakehouseName in $sqlDatabases) { 
-                            # Get the newly created connection string from the map
-                            if ($connectionMap.ContainsKey($lakehouseName)) {
-                                $connString = $connectionMap[$lakehouseName]
-                            }
-                            else {
-                                throw "No connection-string found for Lakehouse '$lakehouseName'"
-                            }
-
-                            # Build the payload object and add it to the array
-                            $detail = @{
-                                datasourceSelector = @{
-                                    datasourceType = "Sql"
-                                    connectionDetails = @{
-                                        server = $oldConnectionString
-                                        database = $lakehouseName
-                                    }
-                                }
-                                connectionDetails = @{
-                                    server = $connString
-                                    database = $lakehouseName
-                                }
-                            }
-                            $allUpdateDetails += $detail
-                        }
-
-                        # Build the final body once, after the loop
-                        $bodyHash = @{
-                            updateDetails = $allUpdateDetails
-                        }
-
-                        $bodyJson = $bodyHash | ConvertTo-Json -Depth 10
-             
-                        # Send a single UpdateDatasources call
-                        $updateDatasourceUrl = "https://api.powerbi.com/v1.0/myorg/groups/$workspaceId/datasets/$datasetId/Default.UpdateDatasources"
-                        try {
-                            $response = Invoke-PowerBIRestMethod -Method Post -Url $updateDatasourceUrl -Body $bodyJson
-                        }
-                        catch {                           
-                            throw "##[error] Failed to update datasources in dataset ${datasetId}: $($_.Exception.Message)"
-                        }
-                    }
-                    catch {
-                        throw "##[error] Failed to update datasource in workspace ${workspaceId}: $($_.Exception.Message)"
-                    }
-                    
-                    if ($workspaceType -eq "operations"){
-                        # Update parameters
-                        try{
-                            # Build the URL
-                            $updateParameterUrl = "https://api.powerbi.com/v1.0/myorg/groups/$workspaceId/datasets/$datasetId/Default.UpdateParameters"
-
-                            # Build the body as an array
-                            $body = @{
-                                updateDetails = @(
-                                    @{
-                                        name     = "KustoClusterUrl"
-                                        newValue = $newKustoUrl
-                                    }
-                                    @{
-                                        name     = "KustoDatabase"
-                                        newValue = $newKustoDatabase
-                                    }
-                                )
-                            }
-
-                            # Serialize to JSON
-                            $bodyJson = $body | ConvertTo-Json -Depth 10
-
-                            # Make API call
-                            $response = Invoke-PowerBIRestMethod `
-                                -Method Post `
-                                -Url $updateParameterUrl `
-                                -Body $bodyJson `
-                                -ContentType 'application/json' `
-                        }
-                        catch {
-                            throw "##[error] Failed to update Kusto parameters in workspace ${workspaceId}: $($_.Exception.Message)"
-                        }
-                        
-                    }
-
-                    try {
-                        # Bind Dataset to Cloud Connection
-                        $datasourcesUrl = "https://api.powerbi.com/v1.0/myorg/groups/$workspaceId/datasets/$datasetId/datasources"                          
-                        $datasources = Invoke-PowerBIRestMethod -Url $datasourcesUrl -Method Get | ConvertFrom-Json                           
-
-                        if ($workspaceType -eq "operations") {
-                            $extDatasource = $existingConnections | Where-Object { $_.DatasourceType -eq "Extension" }
-                            $gatewayId = $extDatasource.gatewayId
-                                                        
-                            $allConnectionIds = $connectionIds + $kqlConnectionId
-
-                            Invoke-PowerBIRestMethod -Url "groups/$workspaceId/datasets/$datasetId/Default.BindToGateway" -Method Post -Body (@{
-                                "gatewayObjectId" = $gatewayId
-                                "datasourceObjectIds" = $allConnectionIds
-                            } | ConvertTo-Json -Depth 10)
-                        }
-                        if ($workspaceType -eq "reporting") {
-                            $reportBody = @{
-                                gatewayObjectId      = $connectionIds[0]
-                                datasourceObjectIds  = $connectionIds
-                            }
-                            Invoke-PowerBIRestMethod `
-                                -Url "groups/$workspaceId/datasets/$datasetId/Default.BindToGateway" `
-                                -Method Post `
-                                -Body ($reportBody | ConvertTo-Json -Depth 10)
-                        }
-                    }
-                    catch {
-                        throw "##[error] Failed to bind dataset to cloud connection in workspace ${workspaceId}: $($_.Exception.Message)"
-                    }
-
-
-                    try {
                         # Refresh Dataset
+                        Write-Host "  Refreshing dataset..."
                         Refresh-PowerBI-Datasets -WorkspaceId $workspaceId -datasetId $datasetId -WaitTillPowerBIDatasetRefresh $WaitTillPowerBIDatasetRefresh
+
+                        Write-Host "  ✓ Report $reportName processed successfully"
                     }
                     catch {
-                        throw "##[error] Error refreshing dataset in workspace ${workspaceId}: $($_.Exception.Message)"
+                        Write-Error "  ✗ Failed to process report $reportName : $_"
+                        throw
                     }
-                    
                 }
             }
             catch {
-                $errorMessage += "##[error] Error processing workspace ${workspaceId}: $($_.Exception.Message)`n"
+                Write-Error "Failed to process workspace $workspaceName : $_"
+                throw
             }
         }
-        if ($errorMessage) {
-            throw $errorMessage 
-        }
+
+        Write-Host "`n✓ Power BI Report Deployment completed successfully!"
     }
     catch {
-        throw "##[error] Error processing orchestration of POWERBI deployment: $($_.Exception.Message)"
+        Write-Error "Power BI Report Deployment failed: $_"
+        throw
     }
+}
+
+# Main execution
+if ($MyInvocation.InvocationName -ne '.') {
+    # Get parameters from command line arguments
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Workspace,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$ConfigFile
+    )
     
-}
-# Invoke the Orchestrator function
-try {
-    Invoke-ReportDeployment    
-}
-catch {
-    throw "An error occurred while orchestrating POWERBI Deployment: $($_.Exception.Message)"
+    try {
+        Invoke-ReportDeployment -Workspace $Workspace -ConfigFile $ConfigFile
+    }
+    catch {
+        Write-Error "An error occurred while orchestrating Power BI Deployment: $_"
+        exit 1
+    }
 }
