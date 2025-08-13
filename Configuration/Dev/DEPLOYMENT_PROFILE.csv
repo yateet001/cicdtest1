@@ -1,0 +1,3 @@
+workspace_name,report_name,report_path,warehouse_name,environment_type,transformation_layer
+DevWorkspace1,Report1,C:\Users\YateetAgrawalMAQSoft\Documents\DemoVisa\Visa\Demo Report\Demo Report.pbix,DevWarehouse,Reporting,Reporting
+DevWorkspace1,Report2,C:\Users\YateetAgrawalMAQSoft\Documents\DemoVisa\Visa\Demo Report\Report2.pbix,DevWarehouse,Operations,Operations

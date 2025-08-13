@@ -1,0 +1,14 @@
+{
+    "DevWorkspaceID": "b42dfb7f-667e-48f9-97c9-12198c700e09",
+    "UATWorkspaceID": "436d60a0-3a50-480d-b7e5-f7a9d3cd5fb5",
+    "DevWarehouseConnection": "2kg5tzezshsufoul3i7hmpw6fy-p75s3nd6m34urf6jcimyy4aobe.datawarehouse.fabric.microsoft.com",
+    "UATWarehouseConnection": "2kg5tzezshsufoul3i7hmpw6fy-ubqg2q2qhigurn7f66u5htk7wu.datawarehouse.fabric.microsoft.com",
+    "DevWarehouseName": "WH_Sales",       
+    "UATWarehouseName": "WH_Uat",        
+    "ReportID": "your-report-id",
+    "AppID": "dd3aa383-4d69-4854-8885-9e483ffb5b72",
+    "AccessToken": "your-access-token",  
+    "TenantID": "e4d98dd2-9199-42e5-ba8b-da3e763ede2e",
+    "ClientID": "dd3aa383-4d69-4854-8885-9e483ffb5b72",
+    "ClientSecret": "82H8Q~TuZnTU9XRytWpK46g.YP_QoTTUww-NWday"
+}
