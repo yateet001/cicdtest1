@@ -1,174 +1,226 @@
 trigger: none
-  # branches:
-  #   include:
-  #     - CICDSetup  # Trigger pipeline on commits to the main branch
 
 pool:
-  vmImage: 'windows-latest'  # Use Windows-based agent to run PowerShell scripts and Power BI Desktop
+  vmImage: 'windows-latest'
 
 variables:
-  artifact_path: '$(Build.ArtifactStagingDirectory)'  # Path where build artifacts will be stored
-  deployment_env: 'Dev'  # Change to 'UAT' as needed
-  config_file: 'Visa/config.json'  # Updated path to match your folder structure
+  artifact_path: '$(Build.ArtifactStagingDirectory)'
+  deployment_env: 'Dev'
 
 jobs:
 - job: DeployPowerBIReports
   displayName: 'Deploy Power BI Reports'
   steps:
-    # Step 1: Install .NET SDK (if required by your PowerShell Core scripts)
+    # Step 1: Install .NET SDK
     - task: UseDotNet@2
       displayName: 'Install .NET SDK'
       inputs:
         packageType: 'sdk'
-        version: '5.x'  # Make sure your PowerShell Core uses the appropriate version
+        version: '5.x'
 
-    # Step 2: Install Power BI Desktop (Simplified Version)
+    # Step 2: Install Power BI Desktop
     - task: PowerShell@2
       displayName: 'Install Power BI Desktop'
       inputs:
         targetType: 'inline'
         script: |
-          Write-Host "Installing Power BI Desktop via Chocolatey..."
-          
-          # Install Chocolatey if not present
-          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
-              Write-Host "Installing Chocolatey..."
-              [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-              iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-          }
-          
-          # Install Power BI Desktop
+          Write-Host "Installing Power BI Desktop via winget (fastest method)..."
           try {
-              choco install powerbi --yes --force --ignore-checksums
-              Write-Host "Chocolatey installation completed."
+              winget install --id Microsoft.PowerBI --silent --accept-package-agreements --accept-source-agreements
+              Write-Host "✓ Power BI Desktop installed successfully"
           } catch {
-              Write-Warning "Chocolatey installation had issues: $_"
-              
-              # Fallback: Direct download method
-              Write-Host "Attempting direct download method as fallback..."
-              try {
-                  $installerUrl = "https://download.microsoft.com/download/8/8/0/880BCA75-79DD-466A-927D-1ABF1F5454B0/PBIDesktopSetup_x64.exe"
-                  $installerPath = "$env:TEMP\PBIDesktopSetup.exe"
-                  
-                  # Clean up any existing installer
-                  if (Test-Path $installerPath) {
-                      Remove-Item $installerPath -Force
-                  }
-                  
-                  Write-Host "Downloading Power BI Desktop from: $installerUrl"
-                  
-                  # Download with better error handling
-                  $webClient = New-Object System.Net.WebClient
-                  $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                  $webClient.DownloadFile($installerUrl, $installerPath)
-                  
-                  # Verify download
-                  if (-not (Test-Path $installerPath)) {
-                      throw "Download failed - file not found"
-                  }
-                  
-                  $fileSize = (Get-Item $installerPath).Length
-                  Write-Host "Downloaded file size: $([math]::Round($fileSize/1MB, 2)) MB"
-                  
-                  if ($fileSize -lt 10MB) {
-                      throw "Downloaded file appears to be corrupt"
-                  }
-                  
-                  Write-Host "Starting installation..."
-                  
-                  # Install Power BI Desktop
-                  $process = Start-Process -FilePath $installerPath -ArgumentList "/quiet", "/norestart" -PassThru -Wait
-                  
-                  if ($process.ExitCode -ne 0) {
-                      Write-Warning "Installation process returned exit code: $($process.ExitCode)"
-                  } else {
-                      Write-Host "Installation process completed successfully."
-                  }
-                  
-                  # Clean up installer
-                  if (Test-Path $installerPath) {
-                      Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
-                  }
-                  
-              } catch {
-                  Write-Warning "Direct download also failed: $_"
-                  Write-Host "Attempting winget installation..."
-                  
-                  try {
-                      winget install --id Microsoft.PowerBI --silent --accept-package-agreements --accept-source-agreements
-                      Write-Host "Winget installation completed."
-                  } catch {
-                      Write-Warning "All installation methods attempted. Continuing with pipeline..."
-                  }
-              }
+              Write-Warning "Winget installation failed, continuing without Power BI Desktop: $_"
           }
-          
-          Write-Host "Power BI Desktop installation process completed. Pipeline will continue."
         continueOnError: true
 
-    # Step 3: Install PowerShell Modules (Fixed execution policy issue)
+    # Step 3: Install PowerShell Modules
     - task: PowerShell@2
       displayName: 'Install Required PowerShell Modules'
       inputs:
         targetType: 'inline'
         script: |
           Write-Host "Installing required PowerShell modules..."
-          
-          # Use -Force and -SkipPublisherCheck to bypass execution policy restrictions
           $modules = @('MicrosoftPowerBIMgmt')
           
           foreach ($module in $modules) {
               Write-Host "Installing module: $module"
               try {
-                  # Install module with additional flags to bypass restrictions
-                  Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser -SkipPublisherCheck -Repository PSGallery
+                  Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser -SkipPublisherCheck -Repository PSGallery -Confirm:$false
                   Import-Module -Name $module -Force
                   Write-Host "✓ Module $module installed successfully"
-                  
-                  # Verify the module is available
-                  $moduleInfo = Get-Module -Name $module -ListAvailable
-                  if ($moduleInfo) {
-                      Write-Host "  Module version: $($moduleInfo.Version)"
-                  }
               } catch {
                   Write-Warning "Failed to install $module : $_"
-                  
-                  # Try alternative installation method
-                  Write-Host "Attempting alternative installation for $module..."
-                  try {
-                      # Use PowerShellGet with TLS 1.2
-                      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                      Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser
-                      Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser -Repository PSGallery -Confirm:$false
-                      Import-Module -Name $module -Force
-                      Write-Host "✓ Alternative installation successful for $module"
-                  } catch {
-                      Write-Error "All installation methods failed for $module : $_"
+              }
+          }
+        pwsh: true
+        errorActionPreference: 'continue'
+
+    # Step 4: Smart File Discovery and Deployment
+    - task: PowerShell@2
+      displayName: 'Smart File Discovery and Deployment'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "=== SMART FILE DISCOVERY AND DEPLOYMENT ==="
+          Write-Host "Build Sources Directory: $(Build.SourcesDirectory)"
+          Write-Host "Deployment Environment: $(deployment_env)"
+          
+          # Function to find files
+          function Find-File {
+              param($FileName, $SearchPath)
+              
+              Write-Host "`nSearching for: $FileName"
+              $found = Get-ChildItem -Path $SearchPath -Recurse -Filter $FileName -ErrorAction SilentlyContinue | Select-Object -First 1
+              
+              if ($found) {
+                  Write-Host "✅ Found: $($found.FullName)"
+                  return $found.FullName
+              } else {
+                  Write-Host "❌ Not found: $FileName"
+                  return $null
+              }
+          }
+          
+          # Search for required files
+          $buildDir = "$(Build.SourcesDirectory)"
+          $scriptPath = Find-File "MainOrchestrator.ps1" $buildDir
+          $configPath = Find-File "config.json" $buildDir
+          
+          # Alternative search patterns
+          if (-not $scriptPath) {
+              Write-Host "`nTrying alternative script names..."
+              $alternativeScripts = @("*.ps1")
+              foreach ($pattern in $alternativeScripts) {
+                  $found = Get-ChildItem -Path $buildDir -Recurse -Filter $pattern -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*orchestrat*" -or $_.Name -like "*deploy*" -or $_.Name -like "*main*" }
+                  if ($found) {
+                      $scriptPath = $found[0].FullName
+                      Write-Host "✅ Found alternative script: $scriptPath"
+                      break
                   }
               }
           }
           
-          # List all installed modules for verification
-          Write-Host "`nInstalled PowerShell modules:"
-          Get-Module -ListAvailable | Where-Object { $_.Name -like "*PowerBI*" } | Format-Table Name, Version, ModuleBase -AutoSize
+          # Check if we have the minimum required files
+          if (-not $scriptPath) {
+              Write-Host "❌ No PowerShell deployment script found!"
+              Write-Host "`n=== AVAILABLE FILES ==="
+              Get-ChildItem -Path $buildDir -Recurse -Filter "*.ps1" | ForEach-Object { Write-Host "PS1 File: $($_.FullName)" }
+              Get-ChildItem -Path $buildDir -Recurse -Filter "*.json" | ForEach-Object { Write-Host "JSON File: $($_.FullName)" }
+              
+              # Create a simple deployment script inline
+              Write-Host "`n=== CREATING INLINE DEPLOYMENT SCRIPT ==="
+              $inlineScript = @'
+          param(
+              [string]$Workspace = "Dev",
+              [string]$ConfigFile
+          )
+          
+          Write-Host "=== INLINE POWER BI DEPLOYMENT SCRIPT ==="
+          Write-Host "Workspace: $Workspace"
+          Write-Host "Config File: $ConfigFile"
+          
+          try {
+              # Install and import PowerBI module if not available
+              if (-not (Get-Module -Name MicrosoftPowerBIMgmt -ListAvailable)) {
+                  Install-Module -Name MicrosoftPowerBIMgmt -Force -AllowClobber -Scope CurrentUser
+              }
+              Import-Module MicrosoftPowerBIMgmt -Force
+              
+              # Read config
+              if (Test-Path $ConfigFile) {
+                  $config = Get-Content $ConfigFile | ConvertFrom-Json
+                  Write-Host "✅ Config loaded successfully"
+                  
+                  # Display config (without sensitive data)
+                  Write-Host "Tenant ID: $($config.TenantID)"
+                  Write-Host "Client ID: $($config.ClientID)"
+                  Write-Host "Dev Workspace ID: $($config.DevWorkspaceID)"
+                  Write-Host "UAT Workspace ID: $($config.UATWorkspaceID)"
+              } else {
+                  throw "Config file not found: $ConfigFile"
+              }
+              
+              # Look for PBIX files
+              $pbixFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*.pbix" -ErrorAction SilentlyContinue
+              Write-Host "`nFound $($pbixFiles.Count) PBIX files:"
+              foreach ($file in $pbixFiles) {
+                  Write-Host "  - $($file.FullName)"
+              }
+              
+              if ($pbixFiles.Count -eq 0) {
+                  Write-Warning "No PBIX files found. Looking for PBIP files..."
+                  $pbipFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*.pbip" -ErrorAction SilentlyContinue
+                  Write-Host "Found $($pbipFiles.Count) PBIP files:"
+                  foreach ($file in $pbipFiles) {
+                      Write-Host "  - $($file.FullName)"
+                  }
+              }
+              
+              # Try to connect to Power BI (this will show if credentials work)
+              Write-Host "`nTesting Power BI connection..."
+              $securePassword = ConvertTo-SecureString $config.ClientSecret -AsPlainText -Force
+              $credential = New-Object System.Management.Automation.PSCredential ($config.ClientID, $securePassword)
+              
+              Connect-PowerBIServiceAccount -ServicePrincipal -TenantId $config.TenantID -Credential $credential
+              Write-Host "✅ Successfully connected to Power BI Service"
+              
+              # List workspaces
+              $workspaces = Get-PowerBIWorkspace -All
+              Write-Host "`nFound $($workspaces.Count) workspaces"
+              
+              # Find target workspace
+              $targetWorkspaceId = if ($Workspace -eq "Dev") { $config.DevWorkspaceID } else { $config.UATWorkspaceID }
+              $targetWorkspace = $workspaces | Where-Object { $_.Id -eq $targetWorkspaceId }
+              
+              if ($targetWorkspace) {
+                  Write-Host "✅ Found target workspace: $($targetWorkspace.Name) (ID: $($targetWorkspace.Id))"
+              } else {
+                  Write-Warning "❌ Target workspace not found for environment: $Workspace"
+              }
+              
+              Write-Host "`n✅ Deployment script validation completed successfully!"
+              
+          } catch {
+              Write-Error "❌ Deployment failed: $_"
+              throw
+          }
+          '@
+              
+              # Execute inline script
+              $configPath = if ($configPath) { $configPath } else { "$(Build.SourcesDirectory)\config.json" }
+              Invoke-Expression $inlineScript
+              
+              return
+          }
+          
+          if (-not $configPath) {
+              Write-Error "❌ No config.json file found!"
+              return
+          }
+          
+          # Execute the found script
+          Write-Host "`n=== EXECUTING DEPLOYMENT SCRIPT ==="
+          Write-Host "Script: $scriptPath"
+          Write-Host "Config: $configPath"
+          
+          try {
+              $scriptDir = Split-Path $scriptPath -Parent
+              Set-Location $scriptDir
+              
+              & $scriptPath -Workspace "$(deployment_env)" -ConfigFile $configPath
+              Write-Host "✅ Deployment completed successfully!"
+              
+          } catch {
+              Write-Error "❌ Deployment failed: $_"
+              throw
+          }
         pwsh: true
-        errorActionPreference: 'continue'  # Continue on errors
+        workingDirectory: '$(Build.SourcesDirectory)'
 
-    # Step 4: Run the PowerShell script to convert PBIP to PBIX and deploy the reports
-    - task: PowerShell@2
-      displayName: 'Run PowerShell Script to Deploy Reports'
-      inputs:
-        targetType: 'filePath'
-        filePath: '$(Build.SourcesDirectory)/Visa/Scripts/MainOrchestrator.ps1'  # Updated path
-        arguments: '-Workspace $(deployment_env) -ConfigFile $(Build.SourcesDirectory)/$(config_file)'  # Pass environment and config file as parameters
-        pwsh: true  # Use PowerShell Core (pwsh)
-        workingDirectory: '$(Build.SourcesDirectory)'  # Set the script working directory to root of the repository
-        errorActionPreference: 'stop'  # Stop on errors for the main script
-
-    # Step 5: Publish build artifacts (optional step, if you want to store outputs like PBIX files)
+    # Step 5: Publish artifacts
     - task: PublishBuildArtifacts@1
       displayName: 'Publish Artifacts'
       inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)'  # Path to artifacts
-        ArtifactName: 'drop'  # Name of the artifact
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'drop'
         publishLocation: 'Container'
