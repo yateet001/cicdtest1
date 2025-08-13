@@ -9,7 +9,7 @@ pool:
 variables:
   artifact_path: '$(Build.ArtifactStagingDirectory)'  # Path where build artifacts will be stored
   deployment_env: 'Dev'  # Change to 'UAT' as needed
-  config_file: 'Config/config.json'  # Path to your config.json file (should be stored in the repository)
+  config_file: 'Visa/config.json'  # Updated path to match your folder structure
 
 jobs:
 - job: DeployPowerBIReports
@@ -33,7 +33,6 @@ jobs:
           # Install Chocolatey if not present
           if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
               Write-Host "Installing Chocolatey..."
-              Set-ExecutionPolicy Bypass -Scope Process -Force
               [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
               iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
           }
@@ -107,7 +106,7 @@ jobs:
           Write-Host "Power BI Desktop installation process completed. Pipeline will continue."
         continueOnError: true
 
-    # Step 3: Install PowerShell Modules
+    # Step 3: Install PowerShell Modules (Fixed execution policy issue)
     - task: PowerShell@2
       displayName: 'Install Required PowerShell Modules'
       inputs:
@@ -115,33 +114,56 @@ jobs:
         script: |
           Write-Host "Installing required PowerShell modules..."
           
-          # Set PowerShell execution policy
-          Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-          
-          # Install required modules
+          # Use -Force and -SkipPublisherCheck to bypass execution policy restrictions
           $modules = @('MicrosoftPowerBIMgmt')
           
           foreach ($module in $modules) {
               Write-Host "Installing module: $module"
               try {
-                  Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser
+                  # Install module with additional flags to bypass restrictions
+                  Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser -SkipPublisherCheck -Repository PSGallery
                   Import-Module -Name $module -Force
                   Write-Host "✓ Module $module installed successfully"
+                  
+                  # Verify the module is available
+                  $moduleInfo = Get-Module -Name $module -ListAvailable
+                  if ($moduleInfo) {
+                      Write-Host "  Module version: $($moduleInfo.Version)"
+                  }
               } catch {
                   Write-Warning "Failed to install $module : $_"
+                  
+                  # Try alternative installation method
+                  Write-Host "Attempting alternative installation for $module..."
+                  try {
+                      # Use PowerShellGet with TLS 1.2
+                      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                      Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser
+                      Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser -Repository PSGallery -Confirm:$false
+                      Import-Module -Name $module -Force
+                      Write-Host "✓ Alternative installation successful for $module"
+                  } catch {
+                      Write-Error "All installation methods failed for $module : $_"
+                  }
               }
           }
+          
+          # List all installed modules for verification
+          Write-Host "`nInstalled PowerShell modules:"
+          Get-Module -ListAvailable | Where-Object { $_.Name -like "*PowerBI*" } | Format-Table Name, Version, ModuleBase -AutoSize
         pwsh: true
+        errorActionPreference: 'continue'  # Continue on errors
 
     # Step 4: Run the PowerShell script to convert PBIP to PBIX and deploy the reports
     - task: PowerShell@2
       displayName: 'Run PowerShell Script to Deploy Reports'
       inputs:
         targetType: 'filePath'
-        filePath: '$(Build.SourcesDirectory)/Scripts/MainOrchestrator.ps1'  # Path to the PowerShell script
+        filePath: '$(Build.SourcesDirectory)/Visa/Scripts/MainOrchestrator.ps1'  # Updated path
         arguments: '-Workspace $(deployment_env) -ConfigFile $(Build.SourcesDirectory)/$(config_file)'  # Pass environment and config file as parameters
         pwsh: true  # Use PowerShell Core (pwsh)
         workingDirectory: '$(Build.SourcesDirectory)'  # Set the script working directory to root of the repository
+        errorActionPreference: 'stop'  # Stop on errors for the main script
 
     # Step 5: Publish build artifacts (optional step, if you want to store outputs like PBIX files)
     - task: PublishBuildArtifacts@1
