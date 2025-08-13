@@ -1,7 +1,7 @@
 trigger:
   branches:
     include:
-      - main  # Trigger pipeline on commits to the main branch
+      - CICDSetup  # Trigger pipeline on commits to the main branch
 
 pool:
   vmImage: 'windows-latest'  # Use Windows-based agent to run PowerShell scripts and Power BI Desktop
@@ -30,19 +30,41 @@ jobs:
         script: |
           # Set the download URL for Power BI Desktop
           $installerUrl = "https://go.microsoft.com/fwlink/?linkid=834144"  # Direct HTTPS download link
-          $installerPath = "C:\temp\PBIDesktopSetup.exe"
+          $installerPath = "C:\Windows\Temp\PBIDesktopSetup.exe"  # Use a different temp directory to avoid issues with C:\temp
 
           # Download Power BI Desktop installer
-          Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
+          Write-Host "Downloading Power BI Desktop..."
+          try {
+              Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
+              Write-Host "Download completed successfully to $installerPath"
+          } catch {
+              Write-Error "Failed to download Power BI Desktop. Error: $_"
+              exit 1
+          }
+
+          # Check if the installer was downloaded successfully
+          if (-not (Test-Path $installerPath)) {
+              Write-Error "Power BI Desktop installer could not be downloaded."
+              exit 1
+          }
 
           # Install Power BI Desktop silently
-          Start-Process -FilePath $installerPath -ArgumentList "/quiet /norestart" -Wait
+          try {
+              Start-Process -FilePath $installerPath -ArgumentList "/quiet /norestart" -Wait
+              Write-Host "Installation completed successfully."
+          } catch {
+              Write-Error "Failed to install Power BI Desktop. Error: $_"
+              exit 1
+          }
 
           # Ensure Power BI Desktop is installed
           $powerBIDesktopPath = "C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe"
           if (-not (Test-Path $powerBIDesktopPath)) {
-              throw "Power BI Desktop is not installed. Please check the installation."
+              Write-Error "Power BI Desktop is not installed. Please check the installation."
+              exit 1
           }
+
+          Write-Host "Power BI Desktop installation completed successfully."
 
     # Step 3: Run the PowerShell script to convert PBIP to PBIX and deploy the reports
     - task: PowerShell@2
