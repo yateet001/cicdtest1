@@ -215,20 +215,9 @@ jobs:
               throw
           }
         pwsh: true
-        errorActionPreference: 'continue'  # Continue on errors
+        workingDirectory: '$(Build.SourcesDirectory)'
 
-    # Step 4: Run the PowerShell script to convert PBIP to PBIX and deploy the reports
-    - task: PowerShell@2
-      displayName: 'Run PowerShell Script to Deploy Reports'
-      inputs:
-        targetType: 'filePath'
-        filePath: '$(Build.SourcesDirectory)/Visa/Scripts/MainOrchestrator.ps1'  # Updated path
-        arguments: '-Workspace $(deployment_env) -ConfigFile $(Build.SourcesDirectory)/$(config_file)'  # Pass environment and config file as parameters
-        pwsh: true  # Use PowerShell Core (pwsh)
-        workingDirectory: '$(Build.SourcesDirectory)'  # Set the script working directory to root of the repository
-        errorActionPreference: 'stop'  # Stop on errors for the main script
-
-    # Step 5: Publish build artifacts (optional step, if you want to store outputs like PBIX files)
+    # Step 5: Publish artifacts
     - task: PublishBuildArtifacts@1
       displayName: 'Publish Artifacts'
       inputs:
