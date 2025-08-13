@@ -154,18 +154,128 @@ jobs:
         pwsh: true
         errorActionPreference: 'continue'  # Continue on errors
 
-    # Step 4: Run the PowerShell script to convert PBIP to PBIX and deploy the reports
+    # Step 4: Debug - List files to verify structure
+    - task: PowerShell@2
+      displayName: 'Debug - List Repository Structure'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "=== Repository Structure Debug ==="
+          Write-Host "Build Sources Directory: $(Build.SourcesDirectory)"
+          Write-Host "Current Location: $(Get-Location)"
+          
+          Write-Host "`n=== Root Directory Contents ==="
+          Get-ChildItem -Path "$(Build.SourcesDirectory)" -Force | Format-Table Name, PSIsContainer, Length -AutoSize
+          
+          Write-Host "`n=== Looking for Visa folder ==="
+          $visaPath = "$(Build.SourcesDirectory)\Visa"
+          if (Test-Path $visaPath) {
+              Write-Host "✓ Visa folder found at: $visaPath"
+              Get-ChildItem -Path $visaPath -Force | Format-Table Name, PSIsContainer, Length -AutoSize
+              
+              Write-Host "`n=== Looking for Scripts folder ==="
+              $scriptsPath = "$visaPath\Scripts"
+              if (Test-Path $scriptsPath) {
+                  Write-Host "✓ Scripts folder found at: $scriptsPath"
+                  Get-ChildItem -Path $scriptsPath -Force | Format-Table Name, PSIsContainer, Length -AutoSize
+              } else {
+                  Write-Warning "✗ Scripts folder not found at: $scriptsPath"
+              }
+              
+              Write-Host "`n=== Looking for Config file ==="
+              $configPath = "$visaPath\config.json"
+              if (Test-Path $configPath) {
+                  Write-Host "✓ Config file found at: $configPath"
+              } else {
+                  Write-Warning "✗ Config file not found at: $configPath"
+              }
+          } else {
+              Write-Warning "✗ Visa folder not found at: $visaPath"
+              Write-Host "`nSearching for PowerShell files recursively..."
+              Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*.ps1" | Format-Table FullName -AutoSize
+          }
+        pwsh: true
+        continueOnError: true
+
+    # Step 5: Run the PowerShell script to convert PBIP to PBIX and deploy the reports
     - task: PowerShell@2
       displayName: 'Run PowerShell Script to Deploy Reports'
       inputs:
-        targetType: 'filePath'
-        filePath: '$(Build.SourcesDirectory)/Visa/Scripts/MainOrchestrator.ps1'  # Updated path
-        arguments: '-Workspace $(deployment_env) -ConfigFile $(Build.SourcesDirectory)/$(config_file)'  # Pass environment and config file as parameters
+        targetType: 'inline'
+        script: |
+          # Define paths
+          $buildSourcesDir = "$(Build.SourcesDirectory)"
+          $scriptPath = "$buildSourcesDir\Visa\Scripts\MainOrchestrator.ps1"
+          $configPath = "$buildSourcesDir\Visa\config.json"
+          
+          Write-Host "=== Deployment Script Execution ==="
+          Write-Host "Build Sources Directory: $buildSourcesDir"
+          Write-Host "Script Path: $scriptPath"
+          Write-Host "Config Path: $configPath"
+          Write-Host "Workspace: $(deployment_env)"
+          
+          # Verify files exist before execution
+          if (-not (Test-Path $scriptPath)) {
+              Write-Error "Script file not found: $scriptPath"
+              
+              # Try to find the script in alternative locations
+              Write-Host "Searching for MainOrchestrator.ps1 in repository..."
+              $foundScripts = Get-ChildItem -Path $buildSourcesDir -Recurse -Filter "MainOrchestrator.ps1" -ErrorAction SilentlyContinue
+              
+              if ($foundScripts) {
+                  Write-Host "Found MainOrchestrator.ps1 files at:"
+                  foreach ($script in $foundScripts) {
+                      Write-Host "  - $($script.FullName)"
+                  }
+                  
+                  # Use the first found script
+                  $scriptPath = $foundScripts[0].FullName
+                  Write-Host "Using script at: $scriptPath"
+              } else {
+                  throw "MainOrchestrator.ps1 not found anywhere in the repository"
+              }
+          }
+          
+          if (-not (Test-Path $configPath)) {
+              Write-Error "Config file not found: $configPath"
+              
+              # Try to find the config in alternative locations
+              Write-Host "Searching for config.json in repository..."
+              $foundConfigs = Get-ChildItem -Path $buildSourcesDir -Recurse -Filter "config.json" -ErrorAction SilentlyContinue
+              
+              if ($foundConfigs) {
+                  Write-Host "Found config.json files at:"
+                  foreach ($config in $foundConfigs) {
+                      Write-Host "  - $($config.FullName)"
+                  }
+                  
+                  # Use the first found config
+                  $configPath = $foundConfigs[0].FullName
+                  Write-Host "Using config at: $configPath"
+              } else {
+                  throw "config.json not found anywhere in the repository"
+              }
+          }
+          
+          # Change to script directory
+          $scriptDir = Split-Path $scriptPath -Parent
+          Set-Location $scriptDir
+          Write-Host "Changed working directory to: $scriptDir"
+          
+          # Execute the script
+          Write-Host "`n=== Executing Deployment Script ==="
+          try {
+              & $scriptPath -Workspace "$(deployment_env)" -ConfigFile $configPath
+              Write-Host "✓ Script execution completed successfully"
+          } catch {
+              Write-Error "✗ Script execution failed: $_"
+              throw
+          }
         pwsh: true  # Use PowerShell Core (pwsh)
         workingDirectory: '$(Build.SourcesDirectory)'  # Set the script working directory to root of the repository
         errorActionPreference: 'stop'  # Stop on errors for the main script
 
-    # Step 5: Publish build artifacts (optional step, if you want to store outputs like PBIX files)
+    # Step 6: Publish build artifacts (optional step, if you want to store outputs like PBIX files)
     - task: PublishBuildArtifacts@1
       displayName: 'Publish Artifacts'
       inputs:
