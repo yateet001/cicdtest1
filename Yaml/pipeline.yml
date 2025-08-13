@@ -1,0 +1,71 @@
+trigger:
+  branches:
+    include:
+      - main  # Trigger pipeline on commits to the main branch
+
+pool:
+  vmImage: 'windows-latest'  # Use Windows-based agent to run PowerShell scripts and Power BI Desktop
+
+variables:
+  artifact_path: '$(Build.ArtifactStagingDirectory)'  # Path where build artifacts will be stored
+  deployment_env: 'Dev'  # Change to 'UAT' as needed
+  config_file: 'Configuration/config.json'  # Path to your config.json file (should be stored in the repository)
+
+jobs:
+- job: DeployPowerBIReports
+  displayName: 'Deploy Power BI Reports'
+  steps:
+  # Step 1: Install .NET SDK (if required by your PowerShell Core scripts)
+  - task: UseDotNet@2
+    displayName: 'Install .NET SDK'
+    inputs:
+      packageType: 'sdk'
+      version: '5.x'  # Make sure your PowerShell Core uses the appropriate version
+
+  # Step 2: Install Power BI Desktop (for PBIP to PBIX conversion)
+  - task: PowerShell@2
+    displayName: 'Install Power BI Desktop'
+    inputs:
+      targetType: 'inline'
+      script: |
+        # Ensure Power BI Desktop is installed for PBIP to PBIX conversion
+        $powerBIDesktopPath = "C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe"
+        if (-not (Test-Path $powerBIDesktopPath)) {
+            throw "Power BI Desktop is not installed. Please install it and try again."
+        }
+
+  # Step 3: Run the PowerShell script to convert PBIP to PBIX and deploy the reports
+  - task: PowerShell@2
+    displayName: 'Run PowerShell Script to Deploy Reports'
+    inputs:
+      targetType: 'filePath'
+      filePath: '$(Build.SourcesDirectory)/Scripts/MainOrchestrator.ps1'  # Path to the PowerShell script
+      arguments: '-Workspace $(deployment_env) -ConfigFile $(Build.SourcesDirectory)/$(config_file)'  # Pass environment and config file as parameters
+      pwsh: true  # Use PowerShell Core (pwsh)
+      workingDirectory: '$(Build.SourcesDirectory)'  # Set the script working directory to root of the repository
+
+  # Step 4: Publish build artifacts (optional step, if you want to store outputs like PBIX files)
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifacts'
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)'  # Path to artifacts
+      ArtifactName: 'drop'  # Name of the artifact
+      publishLocation: 'Container'
+
+  # Step 5: Notify or log success (optional, if you want to log deployment success)
+  - task: SendMail@1
+    condition: succeeded()
+    displayName: 'Send Success Notification'
+    inputs:
+      To: 'youremail@example.com'  # Replace with the recipient's email
+      Subject: 'Power BI Report Deployment Success'
+      Body: 'The Power BI reports have been successfully deployed to the specified workspace.'
+
+  # Optional: Send failure notification (if the pipeline fails)
+  - task: SendMail@1
+    condition: failed()
+    displayName: 'Send Failure Notification'
+    inputs:
+      To: 'youremail@example.com'  # Replace with the recipient's email
+      Subject: 'Power BI Report Deployment Failed'
+      Body: 'The Power BI report deployment failed. Please check the pipeline logs for more details.'
