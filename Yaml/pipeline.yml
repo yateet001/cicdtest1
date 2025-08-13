@@ -9,7 +9,7 @@ pool:
 variables:
   artifact_path: '$(Build.ArtifactStagingDirectory)'  # Path where build artifacts will be stored
   deployment_env: 'Dev'  # Change to 'UAT' as needed
-  config_file: 'Configuration/config.json'  # Path to your config.json file (should be stored in the repository)
+  config_file: 'Config/config.json'  # Path to your config.json file (should be stored in the repository)
 
 jobs:
 - job: DeployPowerBIReports
@@ -51,21 +51,3 @@ jobs:
       PathtoPublish: '$(Build.ArtifactStagingDirectory)'  # Path to artifacts
       ArtifactName: 'drop'  # Name of the artifact
       publishLocation: 'Container'
-
-  # Step 5: Notify or log success (optional, if you want to log deployment success)
-  - task: SendMail@1
-    condition: succeeded()
-    displayName: 'Send Success Notification'
-    inputs:
-      To: 'youremail@example.com'  # Replace with the recipient's email
-      Subject: 'Power BI Report Deployment Success'
-      Body: 'The Power BI reports have been successfully deployed to the specified workspace.'
-
-  # Optional: Send failure notification (if the pipeline fails)
-  - task: SendMail@1
-    condition: failed()
-    displayName: 'Send Failure Notification'
-    inputs:
-      To: 'youremail@example.com'  # Replace with the recipient's email
-      Subject: 'Power BI Report Deployment Failed'
-      Body: 'The Power BI report deployment failed. Please check the pipeline logs for more details.'
