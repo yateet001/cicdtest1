@@ -15,46 +15,49 @@ jobs:
 - job: DeployPowerBIReports
   displayName: 'Deploy Power BI Reports'
   steps:
-  # Step 1: Install .NET SDK (if required by your PowerShell Core scripts)
-  - task: UseDotNet@2
-    displayName: 'Install .NET SDK'
-    inputs:
-      packageType: 'sdk'
-      version: '5.x'  # Make sure your PowerShell Core uses the appropriate version
+    # Step 1: Install .NET SDK (if required by your PowerShell Core scripts)
+    - task: UseDotNet@2
+      displayName: 'Install .NET SDK'
+      inputs:
+        packageType: 'sdk'
+        version: '5.x'  # Make sure your PowerShell Core uses the appropriate version
 
-  # Step 2: Install Power BI Desktop (for PBIP to PBIX conversion)
-  - task: PowerShell@2
-    displayName: 'Install Power BI Desktop'
-    inputs:
-      targetType: 'inline'
-      script: |
-        # Ensure Power BI Desktop is installed for PBIP to PBIX conversion
-        $installerUrl = "https://aka.ms/pbidesktop"
-        $installerPath = "C:\temp\PBIDesktopSetup.exe"
+    # Step 2: Install Power BI Desktop (for PBIP to PBIX conversion)
+    - task: PowerShell@2
+      displayName: 'Install Power BI Desktop'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Set the download URL for Power BI Desktop
+          $installerUrl = "https://go.microsoft.com/fwlink/?linkid=834144"  # Direct HTTPS download link
+          $installerPath = "C:\temp\PBIDesktopSetup.exe"
 
-        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
-        Start-Process -FilePath $installerPath -ArgumentList "/quiet /norestart" -Wait
+          # Download Power BI Desktop installer
+          Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
 
-        # Ensure Power BI Desktop is installed
-        $powerBIDesktopPath = "C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe"
-        if (-not (Test-Path $powerBIDesktopPath)) {
-            throw "Power BI Desktop is not installed. Please check the installation."
-        }
+          # Install Power BI Desktop silently
+          Start-Process -FilePath $installerPath -ArgumentList "/quiet /norestart" -Wait
 
-  # Step 3: Run the PowerShell script to convert PBIP to PBIX and deploy the reports
-  - task: PowerShell@2
-    displayName: 'Run PowerShell Script to Deploy Reports'
-    inputs:
-      targetType: 'filePath'
-      filePath: '$(Build.SourcesDirectory)/Scripts/MainOrchestrator.ps1'  # Path to the PowerShell script
-      arguments: '-Workspace $(deployment_env) -ConfigFile $(Build.SourcesDirectory)/$(config_file)'  # Pass environment and config file as parameters
-      pwsh: true  # Use PowerShell Core (pwsh)
-      workingDirectory: '$(Build.SourcesDirectory)'  # Set the script working directory to root of the repository
+          # Ensure Power BI Desktop is installed
+          $powerBIDesktopPath = "C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe"
+          if (-not (Test-Path $powerBIDesktopPath)) {
+              throw "Power BI Desktop is not installed. Please check the installation."
+          }
 
-  # Step 4: Publish build artifacts (optional step, if you want to store outputs like PBIX files)
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifacts'
-    inputs:
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)'  # Path to artifacts
-      ArtifactName: 'drop'  # Name of the artifact
-      publishLocation: 'Container'
+    # Step 3: Run the PowerShell script to convert PBIP to PBIX and deploy the reports
+    - task: PowerShell@2
+      displayName: 'Run PowerShell Script to Deploy Reports'
+      inputs:
+        targetType: 'filePath'
+        filePath: '$(Build.SourcesDirectory)/Scripts/MainOrchestrator.ps1'  # Path to the PowerShell script
+        arguments: '-Workspace $(deployment_env) -ConfigFile $(Build.SourcesDirectory)/$(config_file)'  # Pass environment and config file as parameters
+        pwsh: true  # Use PowerShell Core (pwsh)
+        workingDirectory: '$(Build.SourcesDirectory)'  # Set the script working directory to root of the repository
+
+    # Step 4: Publish build artifacts (optional step, if you want to store outputs like PBIX files)
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifacts'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'  # Path to artifacts
+        ArtifactName: 'drop'  # Name of the artifact
+        publishLocation: 'Container'
