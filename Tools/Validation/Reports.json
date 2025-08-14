@@ -1,0 +1,71 @@
+{
+  "reports": [
+    {
+      "name": "Validation Logs Monitoring Import",
+      "url": "https://app.powerbi.com/groups/23998419-5678-4044-a3bf-81e2d9d18d22/reports/97294d11-ff55-4801-a8ab-1ccadb96d473/3c425ac70775790dd087?experience=power-bi",
+      "pages": [
+        {
+          "name": "Current Run Summary",
+          "visuals": [
+            "Check Results by Check Type",
+            "Pass vs Fail %",
+            "Failed DQ Checks Details",
+            "Failed KPI Checks Details"
+          ]
+        },
+        {
+          "name": "Historical Trend and Analysis",
+          "visuals": [
+            "Pass vs Fail Trend over time",
+            "Fail Rate by Check Type",
+            "Historical Execution Logs"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "EMPN1550_Aman",
+      "url": "https://app.powerbi.com/groups/23998419-5678-4044-a3bf-81e2d9d18d22/reports/03b305c2-a9e7-4f82-857f-1480716910f3/5f5089329d541bb03701?experience=power-bi",
+      "pages": [
+        {
+          "name": "Assignment 2",
+          "visuals": [
+            "Net Price by Brand"
+          ]
+        },
+        {
+          "name": "Assignment 3",
+          "visuals": [
+            "Quantity by Category"
+          ]
+        },
+        {
+          "name": "Assignment 4",
+          "visuals": [
+            "Count of Orders by Category"
+          ]
+        },
+        {
+          "name": "Assignment 5",
+          "visuals": [
+            "Sum of Net Price by AgeGroup"
+          ]
+        },
+        {
+          "name": "Assignment 6",
+          "visuals": [
+            "Sales Amount by Color",
+            "Sales Amount Column by Color"
+          ]
+        },
+        {
+          "name": "Assignment 7",
+          "visuals": [
+            "Discount % by Color",
+            "Discount % by Age Group"
+          ]
+        }
+      ]
+    }
+  ]
+}
