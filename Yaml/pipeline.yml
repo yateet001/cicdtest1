@@ -5,10 +5,10 @@ pool:
 
 variables:
   artifact_path: '$(Build.ArtifactStagingDirectory)'  # Directory for downloaded artifacts
-  config_file: 'Visa/Config/config.json'  # Path to config file containing credentials and settings
-  deployment_profile_dev: 'Visa/Configuration/Deployement_profile_dev.csv'  # Deployment profile for Dev environment
-  deployment_profile_prod: 'Visa/Configuration/Deployement_profile_prod.csv'  # Deployment profile for Prod environment
-  output_folder: 'Visa/OutputLogs'  # Folder for output logs
+  config_file: 'Config/config.json'  # Path to config file containing credentials and settings
+  deployment_profile_dev: 'Configuration/Deployement_profile_dev.csv'  # Deployment profile for Dev environment
+  deployment_profile_prod: 'Configuration/Deployement_profile_prod.csv'  # Deployment profile for Prod environment
+  output_folder: 'OutputLogs'  # Folder for output logs
 
 parameters:
   - name: Deployment_Environment
@@ -83,7 +83,7 @@ stages:
           - task: PowerShell@2
             displayName: "Run Orchestrator PowerShell Script"
             inputs:
-              filePath: 'Visa/Scripts/MainOrchestrator.ps1'
+              filePath: 'Scripts/MainOrchestrator.ps1'
               arguments: |
                 -DeploymentProfile $(deployment_profile_${{ parameters.Deployment_Environment }})
                 -ConfigFile $(config_file)
@@ -94,7 +94,7 @@ stages:
           - task: PowerShell@2
             displayName: "Run Power BI Deployment Script"
             inputs:
-              filePath: 'Visa/Scripts/PBI-Deployment-Utilities.ps1'
+              filePath: 'Scripts/PBI-Deployment-Utilities.ps1'
               arguments: |
                 -WorkspaceName $(deployment_environment)
                 -ConfigFile $(config_file)
