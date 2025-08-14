@@ -1,212 +1,110 @@
 trigger: none
+  # branches:
+  #   include:
+  #     - main  # Trigger pipeline on commits to the main branch
 
-parameters:
-- name: Deployment_Environment
-  displayName: "Deployment_Environment"
-  type: string
-  default: "DEV"
-  values:
-    - "DEV"
-    - "PROD"
-- name: App_Id 
-  displayName: "App_Id"
-  type: string
-  default: "T360"
-  values:
-    - "T360"
-- name: Environment_Type
-  displayName: "Environment_Type"
-  type: string
-  default: "Primary"
-  values:
-    - "Primary"
-    - "Secondary"
-- name: Build_Package_Version
-  displayName: "Build Package Version"
-  type: string
-  default: ""
-- name: Build_Pipeline_Build_Number
-  displayName: "Build Pipeline Build Number"
-  type: string
-  default: ""
-- name: Run_Operations
-  displayName: "Deploy_Operations_Dashboard"
-  type: boolean
-  default: false
-- name: Run_Semantic_Model
-  displayName: "Deploy_Semantic_Models"
-  type: boolean
-  default: false
+pool:
+  vmImage: 'windows-latest'  # Use a Windows-based agent to support PowerShell and Power BI Desktop
 
 variables:
-  - template: /DevOps/CONFIG/T360-UDP-CONFIG_${{parameters.Deployment_Environment}}.yml
-  - name: config_file
-    value: 'config.json'
+  artifact_path: '$(Build.ArtifactStagingDirectory)'  # Directory for downloaded artifacts
+  config_file: 'Visa/Config/config.json'  # Path to config file containing credentials and settings
+  deployment_profile_dev: 'Visa/Configuration/Deployement_profile_dev.csv'  # Deployment profile for Dev environment
+  deployment_profile_prod: 'Visa/Configuration/Deployement_profile_.csv'  # Deployment profile for Prod environment
+  output_folder: 'Visa/OutputLogs'  # Folder for output logs
+
+parameters:
+  - name: Deployment_Environment
+    displayName: "Deployment_Environment"
+    type: string
+    default: "DEV"
+    values:
+      - "DEV"
+      - "PROD"
+
+  - name: Environment_Type
+    displayName: "Environment_Type"
+    type: string
+    default: "Primary"
+    values:
+      - "Primary"
+      - "Secondary"
+
+  - name: Run_Operations
+    displayName: "Deploy_Operations_Dashboard"
+    type: boolean
+    default: true
+
+  - name: Run_Semantic_Model
+    displayName: "Deploy_Semantic_Models"
+    type: boolean
+    default: true
 
 stages:
-- stage: Approval_Stage_${{parameters.Deployment_Environment}}
-  jobs:
-  - deployment: Approval
-    environment: UDP-${{parameters.Deployment_Environment}}-Deploy
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - script: echo "Approve"
+  - stage: Approval_Stage
+    jobs:
+      - deployment: Approval
+        environment: UDP-${{ parameters.Deployment_Environment }}-Deploy
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - script: echo "Approval Stage: All good to proceed"
 
-- stage: DeployPBIPToWorkspace
-  displayName: "PBIP Deployment Stage"
-  jobs:
-    - job: DeployPowerBIReports
-      timeoutInMinutes: 360
-      displayName: "Deploy Power BI PBIP Reports"
-      pool:
-        vmImage: "windows-latest"
-      steps:
-        # Step: Azure Key Vault to retrieve secrets
-        - task: AzureKeyVault@2
-          displayName: "Azure Key Vault: ${{ variables.KeyVaultName }}"
-          inputs:
-            azureSubscription: ${{ variables.AdfAzureServiceConnection }}
-            KeyVaultName: ${{ variables.KeyVaultName }}
-            SecretsFilter: |
-              ${{ variables.SpnSecretName }},
-              ${{ variables.UpnSecretName }}
+  - stage: DeployPBIPToWorkspace
+    displayName: "Deploy Power BI PBIP Reports"
+    jobs:
+      - job: DeployPowerBIReports
+        displayName: "Deploy PBIP Reports"
+        timeoutInMinutes: 360
+        pool:
+          vmImage: 'windows-latest'
+        steps:
+          # Step 1: Install .NET SDK
+          - task: UseDotNet@2
+            displayName: 'Install .NET SDK'
+            inputs:
+              packageType: 'sdk'
+              version: '6.x'
 
-        # Step: Install .NET SDK
-        - task: UseDotNet@2
-          displayName: 'Install .NET SDK'
-          inputs:
-            packageType: 'sdk'
-            version: '6.x'
+          # Step 2: Install Power BI Desktop
+          - task: PowerShell@2
+            displayName: 'Install Power BI Desktop'
+            inputs:
+              targetType: inline
+              script: |
+                $msiUrl = "https://go.microsoft.com/fwlink/?linkid=2216531"
+                $msiPath = "$(Build.ArtifactStagingDirectory)\PBIDesktopInstaller.msi"
+                Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath
+                Start-Process msiexec.exe -Wait -ArgumentList "/i `"$msiPath`" /quiet /norestart"
 
-        # Step: Install PowerShell Modules
-        - task: PowerShell@2
-          displayName: 'Install Required PowerShell Modules'
-          inputs:
-            targetType: 'inline'
-            script: |
-              Write-Host "Installing required PowerShell modules..."
-              $modules = @('MicrosoftPowerBIMgmt', 'Az.Accounts', 'Az.Profile')
-              
-              foreach ($module in $modules) {
-                  Write-Host "Installing module: $module"
-                  try {
-                      Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser -SkipPublisherCheck -Repository PSGallery -Confirm:$false
-                      Import-Module -Name $module -Force
-                      Write-Host "✓ Module $module installed successfully"
-                  } catch {
-                      Write-Warning "Failed to install $module : $_"
-                  }
-              }
-            pwsh: true
-            errorActionPreference: 'continue'
+          # Step 3: Run PowerShell Orchestrator Script (Orchestrator.ps1)
+          - task: PowerShell@2
+            displayName: "Run Orchestrator PowerShell Script"
+            inputs:
+              filePath: 'Visa/Scripts/MainOrchestrator.ps1'
+              arguments: >
+                -DeploymentProfile $(deployment_profile_${{ parameters.Deployment_Environment }})
+                -ConfigFile $(config_file)
+                -OutputFolder $(output_folder)
+              pwsh: true
 
-        # Step: Download artifacts from previous build pipeline
-        - task: UniversalPackages@0
-          displayName: "Download Artifacts from Azure Artifact"
-          inputs:
-            command: download
-            vstsFeed: '${{variables.vstsFeedPublish}}'
-            vstsFeedPackage: '${{ variables.ADOProjectName }}_${{ variables.vstspackageFeedName }}_build_${{ variables.targetBranch }}'
-            vstsPackageVersion: ${{ parameters.Build_Package_Version }}
-            downloadDirectory: "$(Build.SourcesDirectory)/ELM"
+          # Step 4: Run Power BI Deployment Script (PBIDeployment.ps1)
+          - task: PowerShell@2
+            displayName: "Run Power BI Deployment Script"
+            inputs:
+              filePath: 'Visa/Scripts/PBI-Deployment-Utilities.ps1'
+              arguments: >
+                -WorkspaceName $(deployment_environment)
+                -ConfigFile $(config_file)
+                -DeploymentProfile $(deployment_profile_${{ parameters.Deployment_Environment }})
+                -OutputFolder $(output_folder)
+              pwsh: true
 
-        # Step: Verify Files and Structure
-        - task: PowerShell@2
-          displayName: 'Verify Files and Structure'
-          inputs:
-            targetType: 'inline'
-            script: |
-              Write-Host "=== FILE VERIFICATION ==="
-              Write-Host "Build Sources Directory: $(Build.SourcesDirectory)"
-              
-              # Check for script file
-              $scriptPath = "$(Build.SourcesDirectory)\ELM\Scripts\MainOrchestrator.ps1"
-              Write-Host "Checking script at: $scriptPath"
-              if (Test-Path $scriptPath) {
-                  Write-Host "✅ Script found"
-                  Write-Host "Script size: $((Get-Item $scriptPath).Length) bytes"
-              } else {
-                  Write-Host "❌ Script not found at expected location"
-                  # Look for script in other locations
-                  $alternativeScripts = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*Orchestrator*.ps1" -ErrorAction SilentlyContinue
-                  if ($alternativeScripts) {
-                      Write-Host "Found orchestrator scripts at:"
-                      foreach ($script in $alternativeScripts) {
-                          Write-Host "  - $($script.FullName)"
-                      }
-                  }
-              }
-              
-              # Check for config file
-              $configPath = "$(Build.SourcesDirectory)\ELM\$(config_file)"
-              Write-Host "Checking config at: $configPath"
-              if (Test-Path $configPath) {
-                  Write-Host "✅ Config found"
-                  Write-Host "Config size: $((Get-Item $configPath).Length) bytes"
-                  
-                  # Show config content (masked)
-                  try {
-                      $config = Get-Content $configPath | ConvertFrom-Json
-                      Write-Host "Config contains:"
-                      Write-Host "  - TenantID: $($config.TenantID)"
-                      Write-Host "  - ClientID: $($config.ClientID)"
-                      Write-Host "  - DevWorkspaceID: $($config.DevWorkspaceID)"
-                      if ($config.UATWorkspaceID) {
-                          Write-Host "  - UATWorkspaceID: $($config.UATWorkspaceID)"
-                      }
-                  } catch {
-                      Write-Warning "Could not parse config file: $_"
-                  }
-              } else {
-                  Write-Host "❌ Config not found"
-              }
-              
-              # Look for PBIP files
-              Write-Host "`n=== PBIP REPORT FILES ==="
-              $pbipFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*.pbip" -ErrorAction SilentlyContinue
-              Write-Host "PBIP files found: $($pbipFiles.Count)"
-              foreach ($file in $pbipFiles) {
-                  Write-Host "  - $($file.FullName)"
-                  
-                  # Check for associated folders
-                  $parentDir = $file.Directory.FullName
-                  $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-                  $reportFolder = Join-Path $parentDir "$baseName.Report"
-                  $semanticModelFolder = Join-Path $parentDir "$baseName.SemanticModel"
-                  
-                  Write-Host "    Report folder exists: $(Test-Path $reportFolder)"
-                  Write-Host "    SemanticModel folder exists: $(Test-Path $semanticModelFolder)"
-              }
-            pwsh: true
-            continueOnError: true
-
-        # Step: Run PowerShell orchestrator script
-        - task: PowerShell@2
-          displayName: 'Deploy PBIP Reports'
-          inputs:
-            targetType: 'filePath'
-            filePath: '$(Build.SourcesDirectory)\ELM\Scripts\MainOrchestrator.ps1'
-            arguments: '-Workspace "${{parameters.Deployment_Environment}}" -ConfigFile "$(Build.SourcesDirectory)\ELM\$(config_file)"'
-            pwsh: true
-            workingDirectory: '$(Build.SourcesDirectory)\ELM'
-            errorActionPreference: 'stop'
-          env:
-            udp_t360_spn: $(udp-t360-spn)
-            udp_t360_upn: $(udp-t360-upn)
-            deployment_env: ${{parameters.Deployment_Environment}}
-            environment_type: ${{parameters.Environment_Type}}
-            artifact_path: "$(Build.SourcesDirectory)/ELM"
-            build_number: ${{parameters.Build_Pipeline_Build_Number}}
-            app_id: ${{parameters.App_Id}}
-            operations: ${{parameters.Run_Operations}}
-            reporting: ${{parameters.Run_Semantic_Model}}
-
-        # Step: Publish artifacts
-        - task: PublishBuildArtifacts@1
-          displayName: 'Publish Deployment Artifacts'
-          inputs:
-            PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-            ArtifactName: 'pbip-deployment-logs'
-            publishLocation: 'Container'
+          # Step 5: Publish deployment logs as artifacts
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Deployment Logs'
+            inputs:
+              PathtoPublish: '$(Build.SourcesDirectory)/$(output_folder)'
+              ArtifactName: 'PowerBI-Deployment-Logs'
+              publishLocation: 'Container'

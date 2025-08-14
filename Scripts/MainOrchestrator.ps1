@@ -1,5 +1,7 @@
-# Import utility scripts with error handling
+# MainOrchestrator.ps1 for PBIP file deployment (with refresh, takeover, and validation logic)
+
 try {
+    # Import utility scripts with error handling
     . "$PSScriptRoot\Token-Utilities.ps1"
     . "$PSScriptRoot\PBI-Deployment-Utilities.ps1"
 } catch {
@@ -96,7 +98,9 @@ function Deploy-PBIPUsingFabricAPI {
         [Parameter(Mandatory=$true)]
         [string]$WorkspaceId,
         [Parameter(Mandatory=$true)]
-        [string]$AccessToken
+        [string]$AccessToken,
+        [Parameter(Mandatory=$true)]
+        [string]$Takeover
     )
     
     try {
@@ -133,12 +137,64 @@ function Deploy-PBIPUsingFabricAPI {
             return $false
         }
         
+        # If takeover is true, do the takeover after deployment
+        if ($Takeover -eq "True") {
+            Takeover-PBIP -ReportName $ReportName -WorkspaceId $WorkspaceId -AccessToken $AccessToken
+        }
+        
+        # Refresh the report after deployment
+        Refresh-PBIP -ReportName $ReportName -WorkspaceId $WorkspaceId -AccessToken $AccessToken
+
         Write-Host "✓ PBIP deployment completed successfully for: $ReportName"
         return $true
         
     } catch {
         Write-Error "Fabric API deployment failed for $ReportName : $_"
         return $false
+    }
+}
+
+function Takeover-PBIP {
+    param(
+        [string]$ReportName,
+        [string]$WorkspaceId,
+        [string]$AccessToken
+    )
+
+    $uri = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports/$ReportName/takeover"
+    
+    $headers = @{
+        "Authorization" = "Bearer $AccessToken"
+        "Content-Type"  = "application/json"
+    }
+
+    try {
+        $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers
+        Write-Host "Report takeover completed successfully: $ReportName"
+    } catch {
+        Write-Error "Failed to takeover report: $_"
+    }
+}
+
+function Refresh-PBIP {
+    param(
+        [string]$ReportName,
+        [string]$WorkspaceId,
+        [string]$AccessToken
+    )
+
+    $uri = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports/$ReportName/refreshes"
+    
+    $headers = @{
+        "Authorization" = "Bearer $AccessToken"
+        "Content-Type"  = "application/json"
+    }
+
+    try {
+        $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers
+        Write-Host "Report refreshed successfully: $ReportName"
+    } catch {
+        Write-Error "Failed to refresh report: $_"
     }
 }
 
@@ -215,83 +271,6 @@ function Deploy-SemanticModel {
         
     } catch {
         Write-Error "Failed to deploy semantic model: $_"
-        return $false
-    }
-}
-
-function Deploy-Report {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$ReportFolder,
-        [Parameter(Mandatory=$true)]
-        [string]$WorkspaceId,
-        [Parameter(Mandatory=$true)]
-        [string]$AccessToken,
-        [Parameter(Mandatory=$true)]
-        [string]$ReportName
-    )
-    
-    try {
-        Write-Host "Deploying report: $ReportName"
-        
-        # Find report.json file
-        $reportDefFile = Join-Path $ReportFolder "report.json"
-        
-        if (-not (Test-Path $reportDefFile)) {
-            throw "report.json file not found in report folder"
-        }
-        
-        # Read report definition
-        $reportDefinition = Get-Content $reportDefFile -Raw
-        Write-Host "Report definition loaded: $($reportDefinition.Length) characters"
-        
-        # Prepare deployment payload
-        $deploymentPayload = @{
-            "name" = $ReportName
-            "definition" = @{
-                "parts" = @(
-                    @{
-                        "path" = "report.json"
-                        "payload" = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($reportDefinition))
-                        "payloadType" = "InlineBase64"
-                    }
-                )
-            }
-        } | ConvertTo-Json -Depth 10
-        
-        # Deploy report using Fabric API
-        $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
-        
-        $headers = @{ 
-            "Authorization" = "Bearer $AccessToken"
-            "Content-Type" = "application/json"
-        }
-        
-        try {
-            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayload -Headers $headers
-            Write-Host "✓ Report deployed successfully"
-            return $true
-        } catch {
-            if ($_.Exception.Response.StatusCode -eq 409) {
-                Write-Host "Report already exists, attempting update..."
-                
-                # Try to update existing report
-                $updateUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports/$ReportName"
-                try {
-                    $updateResponse = Invoke-RestMethod -Uri $updateUrl -Method Patch -Body $deploymentPayload -Headers $headers
-                    Write-Host "✓ Report updated successfully"
-                    return $true
-                } catch {
-                    Write-Warning "Failed to update report: $_"
-                    return $false
-                }
-            } else {
-                throw $_
-            }
-        }
-        
-    } catch {
-        Write-Error "Failed to deploy report: $_"
         return $false
     }
 }
@@ -387,7 +366,6 @@ function Get-AccessTokenFromConfig {
             
             Write-Host "✓ Successfully acquired Power BI API access token as fallback"
             return $accessToken
-            
         } catch {
             Write-Error "Failed to acquire fallback access token: $_"
             throw "Could not acquire any access token"
@@ -445,7 +423,6 @@ function Invoke-ReportDeployment {
                 $targetWorkspaceName = "Dev Workspace"
             }
             "PROD" {
-                # Use UATWorkspaceID as Prod workspace (update your config to have ProdWorkspaceID if needed)
                 $targetWorkspaceId = $config.UATWorkspaceID
                 $targetWorkspaceName = "Prod Workspace"
             }
@@ -513,7 +490,7 @@ function Invoke-ReportDeployment {
             Write-Host "File path: $($pbipFile.FullName)"
             
             # Deploy using Fabric API
-            $deploymentSuccess = Deploy-PBIPUsingFabricAPI -PBIPFilePath $pbipFile.FullName -ReportName $reportName -WorkspaceId $targetWorkspaceId -AccessToken $accessToken
+            $deploymentSuccess = Deploy-PBIPUsingFabricAPI -PBIPFilePath $pbipFile.FullName -ReportName $reportName -WorkspaceId $targetWorkspaceId -AccessToken $accessToken -Takeover "True"
             
             $result = [PSCustomObject]@{
                 ReportName = $reportName
