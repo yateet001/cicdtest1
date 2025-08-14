@@ -1,4 +1,15 @@
 # PBI-Deployment.ps1 for PBIP file deployment (with refresh, takeover, and validation logic)
+param(
+    [string]$WorkspaceName,
+    [string]$ConfigFile,
+    [string]$DeploymentProfile,
+    [string]$OutputFolder
+)
+
+Write-Host "Workspace Name: $WorkspaceName"
+Write-Host "Config File: $ConfigFile"
+Write-Host "Deployment Profile: $DeploymentProfile"
+Write-Host "Output Folder: $OutputFolder"
 
 try {
     # Import utility scripts with error handling

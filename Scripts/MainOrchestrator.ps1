@@ -1,5 +1,13 @@
 # MainOrchestrator.ps1 for PBIP file deployment (with refresh, takeover, and validation logic)
+param(
+    [string]$DeploymentProfile,
+    [string]$ConfigFile,
+    [string]$OutputFolder
+)
 
+Write-Host "Deployment Profile: $DeploymentProfile"
+Write-Host "Config File: $ConfigFile"
+Write-Host "Output Folder: $OutputFolder"
 try {
     # Import utility scripts with error handling
     . "$PSScriptRoot\Token-Utilities.ps1"
