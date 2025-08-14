@@ -404,22 +404,38 @@ function Deploy-PBIPUsingFabricAPI {
     )
     
     try {
-        Write-Host "Starting Fabric API deployment for PBIP: $ReportName"
+        Write-Host "`n========================================="
+        Write-Host "Starting Enhanced PBIP Deployment"
+        Write-Host "Report: $ReportName"
+        Write-Host "========================================="
         
+        # Step 1: Verify workspace access
+        Write-Host "`n--- STEP 1: WORKSPACE VERIFICATION ---"
+        $workspaceAccessible = Verify-WorkspaceAccess -WorkspaceId $WorkspaceId -AccessToken $AccessToken
+        if (-not $workspaceAccessible) {
+            throw "Cannot access target workspace"
+        }
+        
+        # Step 2: List current workspace items (before deployment)
+        Write-Host "`n--- STEP 2: PRE-DEPLOYMENT INVENTORY ---"
+        $preDeploymentItems = List-WorkspaceItems -WorkspaceId $WorkspaceId -AccessToken $AccessToken
+        Write-Host "Pre-deployment: Found $($preDeploymentItems.Count) items in workspace"
+        
+        # Step 3: Validate PBIP structure and content
+        Write-Host "`n--- STEP 3: PBIP VALIDATION ---"
         $validation = Validate-PBIPStructure -PBIPFilePath $PBIPFilePath
         if (-not $validation.IsValid) {
             throw "Invalid PBIP structure for: $ReportName"
         }
         
-        Write-Host "PBIP structure validated successfully"
+        Debug-PBIPContent -PBIPFilePath $PBIPFilePath
         
-        # Deploy Semantic Model first
-        Write-Host "Deploying semantic model..."
+        # Step 4: Deploy Semantic Model
+        Write-Host "`n--- STEP 4: SEMANTIC MODEL DEPLOYMENT ---"
         $semanticModelResult = Deploy-SemanticModel -SemanticModelFolder $validation.SemanticModelFolder -WorkspaceId $WorkspaceId -AccessToken $AccessToken -ModelName $ReportName
         
         if (-not $semanticModelResult.Success) {
-            Write-Warning "Semantic model deployment failed: $($semanticModelResult.Error)"
-            return $false
+            throw "Semantic model deployment failed: $($semanticModelResult.Error)"
         }
         
         if ($semanticModelResult.Warning) {
@@ -427,22 +443,88 @@ function Deploy-PBIPUsingFabricAPI {
         }
         
         $semanticModelId = $semanticModelResult.ModelId
-        Write-Host "Semantic model deployed/found with ID: $semanticModelId"
+        Write-Host "Semantic model result - ID: $semanticModelId"
         
-        # Deploy Report
-        Write-Host "Deploying report..."
+        # Step 5: Wait for semantic model to appear
+        Write-Host "`n--- STEP 5: SEMANTIC MODEL VERIFICATION ---"
+        $semanticModelReady = Wait-ForDeploymentCompletion -WorkspaceId $WorkspaceId -AccessToken $AccessToken -ItemName $ReportName -ItemType "SemanticModel" -MaxWaitMinutes 3
+        
+        if (-not $semanticModelReady) {
+            Write-Warning "Semantic model not found after deployment, but continuing..."
+        }
+        
+        # Step 6: Deploy Report
+        Write-Host "`n--- STEP 6: REPORT DEPLOYMENT ---"
         $reportSuccess = Deploy-Report -ReportFolder $validation.ReportFolder -WorkspaceId $WorkspaceId -AccessToken $AccessToken -ReportName $ReportName -SemanticModelId $semanticModelId
         
         if (-not $reportSuccess) {
-            Write-Warning "Report deployment failed"
-            return $false
+            throw "Report deployment failed"
         }
         
-        Write-Host "✓ PBIP deployment completed successfully for: $ReportName"
-        return $true
+        # Step 7: Wait for report to appear
+        Write-Host "`n--- STEP 7: REPORT VERIFICATION ---"
+        $reportReady = Wait-ForDeploymentCompletion -WorkspaceId $WorkspaceId -AccessToken $AccessToken -ItemName $ReportName -ItemType "Report" -MaxWaitMinutes 3
+        
+        # Step 8: Final verification
+        Write-Host "`n--- STEP 8: FINAL VERIFICATION ---"
+        $verificationResult = Verify-DeploymentResult -WorkspaceId $WorkspaceId -AccessToken $AccessToken -ReportName $ReportName -SemanticModelName $ReportName
+        
+        # Step 9: Post-deployment inventory
+        Write-Host "`n--- STEP 9: POST-DEPLOYMENT INVENTORY ---"
+        $postDeploymentItems = List-WorkspaceItems -WorkspaceId $WorkspaceId -AccessToken $AccessToken
+        Write-Host "Post-deployment: Found $($postDeploymentItems.Count) items in workspace"
+        
+        $newItems = $postDeploymentItems.Count - $preDeploymentItems.Count
+        if ($newItems -gt 0) {
+            Write-Host "✓ Added $newItems new item(s) to workspace"
+        } else {
+            Write-Warning "⚠️ No new items detected in workspace"
+        }
+        
+        # Final assessment
+        Write-Host "`n========================================="
+        Write-Host "DEPLOYMENT SUMMARY"
+        Write-Host "========================================="
+        
+        $overallSuccess = $verificationResult.SemanticModelFound -and $verificationResult.ReportFound
+        
+        if ($overallSuccess) {
+            Write-Host "✓ DEPLOYMENT SUCCESSFUL"
+            Write-Host "  - Semantic Model: ✓ Found"
+            Write-Host "  - Report: ✓ Found"
+            Write-Host "  - Semantic Model ID: $($verificationResult.SemanticModelId)"
+            Write-Host "  - Report ID: $($verificationResult.ReportId)"
+        } else {
+            Write-Warning "⚠️ DEPLOYMENT ISSUES DETECTED"
+            Write-Host "  - Semantic Model: $(if ($verificationResult.SemanticModelFound) { '✓ Found' } else { '❌ Missing' })"
+            Write-Host "  - Report: $(if ($verificationResult.ReportFound) { '✓ Found' } else { '❌ Missing' })"
+            
+            # Provide troubleshooting guidance
+            Write-Host "`n--- TROUBLESHOOTING GUIDANCE ---"
+            if (-not $verificationResult.SemanticModelFound) {
+                Write-Host "• Semantic model missing - check permissions and API scope"
+            }
+            if (-not $verificationResult.ReportFound) {
+                Write-Host "• Report missing - may be deployment timing or API sync issue"
+                Write-Host "• Try checking the workspace manually in a few minutes"
+            }
+        }
+        
+        Write-Host "========================================="
+        
+        return $overallSuccess
         
     } catch {
-        Write-Error "Fabric API deployment failed for $ReportName : $_"
+        Write-Error "Enhanced PBIP deployment failed for $ReportName : $_"
+        
+        # Additional debugging on failure
+        Write-Host "`n--- FAILURE ANALYSIS ---"
+        try {
+            List-WorkspaceItems -WorkspaceId $WorkspaceId -AccessToken $AccessToken
+        } catch {
+            Write-Warning "Could not list workspace items for failure analysis"
+        }
+        
         return $false
     }
 }
