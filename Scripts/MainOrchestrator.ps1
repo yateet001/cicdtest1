@@ -7,36 +7,304 @@ try {
     Write-Host "Attempting to continue without utility scripts..."
 }
 
-function Get-PBIXFiles {
+function Get-PBIPFiles {
     param(
         $ArtifactPath,  # Base path where the artifact is stored
         $Folder         # Subfolder to search in
     )
 
     # Combine base path and subfolder to form the full target path
-    $target = Join-Path $ArtifactPath $Folder
-
-    # Check if the target path exists; throw an error if it doesn't
-    if (-not (Test-Path $target)) {
-        Write-Warning "Path not found: $target"
-        return @()  # Return empty array instead of throwing error
+    if ($Folder) {
+        $target = Join-Path $ArtifactPath $Folder
+    } else {
+        $target = $ArtifactPath
     }
 
-    # Recursively find all .pbix files in the target directory
-    $files = Get-ChildItem -Path $target -Recurse -File -Filter '*.pbix'
+    # Check if the target path exists
+    if (-not (Test-Path $target)) {
+        Write-Warning "Path not found: $target"
+        return @()
+    }
+
+    # Recursively find all .pbip files in the target directory
+    $files = Get-ChildItem -Path $target -Recurse -File -Filter '*.pbip'
+    Write-Host "Found $($files.Count) PBIP files in $target"
+    
+    foreach ($file in $files) {
+        Write-Host "  Found PBIP: $($file.FullName)"
+        
+        # Check for associated folders
+        $parentDir = $file.Directory.FullName
+        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+        $reportFolder = Join-Path $parentDir "$baseName.Report"
+        $semanticModelFolder = Join-Path $parentDir "$baseName.SemanticModel"
+        
+        Write-Host "    Report folder: $(Test-Path $reportFolder)"
+        Write-Host "    SemanticModel folder: $(Test-Path $semanticModelFolder)"
+    }
 
     return $files
 }
 
+function Validate-PBIPStructure {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$PBIPFilePath
+    )
+    
+    $pbipDir = Split-Path $PBIPFilePath -Parent
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($PBIPFilePath)
+    $reportFolder = Join-Path $pbipDir "$baseName.Report"
+    $semanticModelFolder = Join-Path $pbipDir "$baseName.SemanticModel"
+    
+    $isValid = (Test-Path $reportFolder) -and (Test-Path $semanticModelFolder)
+    
+    if ($isValid) {
+        Write-Host "✓ PBIP structure validated for: $baseName"
+        
+        # Check for key files
+        $reportDefFile = Join-Path $reportFolder "report.json"
+        $modelBimFile = Get-ChildItem -Path $semanticModelFolder -Filter "model.bim" -Recurse | Select-Object -First 1
+        
+        Write-Host "    Report definition: $(Test-Path $reportDefFile)"
+        Write-Host "    Model BIM file: $($modelBimFile -ne $null)"
+        
+        return @{
+            IsValid = $true
+            ReportFolder = $reportFolder
+            SemanticModelFolder = $semanticModelFolder
+            ReportDefFile = $reportDefFile
+            ModelBimFile = $modelBimFile.FullName
+        }
+    } else {
+        Write-Warning "Invalid PBIP structure for: $baseName"
+        Write-Warning "  Missing Report folder: $(-not (Test-Path $reportFolder))"
+        Write-Warning "  Missing SemanticModel folder: $(-not (Test-Path $semanticModelFolder))"
+        
+        return @{
+            IsValid = $false
+        }
+    }
+}
+
+function Deploy-PBIPUsingFabricAPI {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$PBIPFilePath,
+        [Parameter(Mandatory=$true)]
+        [string]$ReportName,
+        [Parameter(Mandatory=$true)]
+        [string]$WorkspaceId,
+        [Parameter(Mandatory=$true)]
+        [string]$AccessToken
+    )
+    
+    try {
+        Write-Host "Starting Fabric API deployment for PBIP: $ReportName"
+        
+        $headers = @{ 
+            "Authorization" = "Bearer $AccessToken"
+            "Content-Type" = "application/json"
+        }
+        
+        # Validate PBIP structure
+        $validation = Validate-PBIPStructure -PBIPFilePath $PBIPFilePath
+        if (-not $validation.IsValid) {
+            throw "Invalid PBIP structure for: $ReportName"
+        }
+        
+        Write-Host "PBIP structure validated successfully"
+        
+        # Step 1: Deploy Semantic Model first
+        Write-Host "Deploying semantic model..."
+        $semanticModelSuccess = Deploy-SemanticModel -SemanticModelFolder $validation.SemanticModelFolder -WorkspaceId $WorkspaceId -AccessToken $AccessToken -ModelName $ReportName
+        
+        if (-not $semanticModelSuccess) {
+            Write-Warning "Semantic model deployment failed"
+            return $false
+        }
+        
+        # Step 2: Deploy Report
+        Write-Host "Deploying report..."
+        $reportSuccess = Deploy-Report -ReportFolder $validation.ReportFolder -WorkspaceId $WorkspaceId -AccessToken $AccessToken -ReportName $ReportName
+        
+        if (-not $reportSuccess) {
+            Write-Warning "Report deployment failed"
+            return $false
+        }
+        
+        Write-Host "✓ PBIP deployment completed successfully for: $ReportName"
+        return $true
+        
+    } catch {
+        Write-Error "Fabric API deployment failed for $ReportName : $_"
+        return $false
+    }
+}
+
+function Deploy-SemanticModel {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$SemanticModelFolder,
+        [Parameter(Mandatory=$true)]
+        [string]$WorkspaceId,
+        [Parameter(Mandatory=$true)]
+        [string]$AccessToken,
+        [Parameter(Mandatory=$true)]
+        [string]$ModelName
+    )
+    
+    try {
+        Write-Host "Deploying semantic model: $ModelName"
+        
+        # Find model.bim file
+        $modelBimFile = Get-ChildItem -Path $SemanticModelFolder -Filter "model.bim" -Recurse | Select-Object -First 1
+        
+        if (-not $modelBimFile) {
+            throw "model.bim file not found in semantic model folder"
+        }
+        
+        # Read model definition
+        $modelDefinition = Get-Content $modelBimFile.FullName -Raw
+        Write-Host "Model definition loaded: $($modelDefinition.Length) characters"
+        
+        # Prepare deployment payload
+        $deploymentPayload = @{
+            "name" = $ModelName
+            "definition" = @{
+                "parts" = @(
+                    @{
+                        "path" = "model.bim"
+                        "payload" = $modelDefinition
+                        "payloadType" = "InlineBase64"
+                    }
+                )
+            }
+        } | ConvertTo-Json -Depth 10
+        
+        # Deploy semantic model using Fabric API
+        $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
+        
+        $headers = @{ 
+            "Authorization" = "Bearer $AccessToken"
+            "Content-Type" = "application/json"
+        }
+        
+        try {
+            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayload -Headers $headers
+            Write-Host "✓ Semantic model deployed successfully"
+            return $true
+        } catch {
+            if ($_.Exception.Response.StatusCode -eq 409) {
+                Write-Host "Semantic model already exists, attempting update..."
+                
+                # Try to update existing model
+                $updateUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels/$ModelName"
+                try {
+                    $updateResponse = Invoke-RestMethod -Uri $updateUrl -Method Patch -Body $deploymentPayload -Headers $headers
+                    Write-Host "✓ Semantic model updated successfully"
+                    return $true
+                } catch {
+                    Write-Warning "Failed to update semantic model: $_"
+                    return $false
+                }
+            } else {
+                throw $_
+            }
+        }
+        
+    } catch {
+        Write-Error "Failed to deploy semantic model: $_"
+        return $false
+    }
+}
+
+function Deploy-Report {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$ReportFolder,
+        [Parameter(Mandatory=$true)]
+        [string]$WorkspaceId,
+        [Parameter(Mandatory=$true)]
+        [string]$AccessToken,
+        [Parameter(Mandatory=$true)]
+        [string]$ReportName
+    )
+    
+    try {
+        Write-Host "Deploying report: $ReportName"
+        
+        # Find report.json file
+        $reportDefFile = Join-Path $ReportFolder "report.json"
+        
+        if (-not (Test-Path $reportDefFile)) {
+            throw "report.json file not found in report folder"
+        }
+        
+        # Read report definition
+        $reportDefinition = Get-Content $reportDefFile -Raw
+        Write-Host "Report definition loaded: $($reportDefinition.Length) characters"
+        
+        # Prepare deployment payload
+        $deploymentPayload = @{
+            "name" = $ReportName
+            "definition" = @{
+                "parts" = @(
+                    @{
+                        "path" = "report.json"
+                        "payload" = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($reportDefinition))
+                        "payloadType" = "InlineBase64"
+                    }
+                )
+            }
+        } | ConvertTo-Json -Depth 10
+        
+        # Deploy report using Fabric API
+        $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
+        
+        $headers = @{ 
+            "Authorization" = "Bearer $AccessToken"
+            "Content-Type" = "application/json"
+        }
+        
+        try {
+            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayload -Headers $headers
+            Write-Host "✓ Report deployed successfully"
+            return $true
+        } catch {
+            if ($_.Exception.Response.StatusCode -eq 409) {
+                Write-Host "Report already exists, attempting update..."
+                
+                # Try to update existing report
+                $updateUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports/$ReportName"
+                try {
+                    $updateResponse = Invoke-RestMethod -Uri $updateUrl -Method Patch -Body $deploymentPayload -Headers $headers
+                    Write-Host "✓ Report updated successfully"
+                    return $true
+                } catch {
+                    Write-Warning "Failed to update report: $_"
+                    return $false
+                }
+            } else {
+                throw $_
+            }
+        }
+        
+    } catch {
+        Write-Error "Failed to deploy report: $_"
+        return $false
+    }
+}
+
 function Initialize-PowerShellEnvironment {
-    Write-Host "Initializing PowerShell environment..."
+    Write-Host "Initializing PowerShell environment for PBIP deployment..."
     
     try {
         # Ensure TLS 1.2 is enabled
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         
         # Check if required modules are available
-        $requiredModules = @('MicrosoftPowerBIMgmt')
+        $requiredModules = @('MicrosoftPowerBIMgmt', 'Az.Accounts')
         
         foreach ($module in $requiredModules) {
             $moduleAvailable = Get-Module -Name $module -ListAvailable -ErrorAction SilentlyContinue
@@ -74,6 +342,59 @@ function Initialize-PowerShellEnvironment {
     }
 }
 
+function Get-AccessTokenFromConfig {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$TenantId,
+        [Parameter(Mandatory=$true)]
+        [string]$ClientId,
+        [Parameter(Mandatory=$true)]
+        [string]$ClientSecret
+    )
+    
+    try {
+        Write-Host "Acquiring access token automatically..."
+        
+        # Use Fabric API scope for PBIP deployment
+        $body = @{
+            grant_type    = "client_credentials"
+            client_id     = $ClientId
+            client_secret = $ClientSecret
+            scope         = "https://api.fabric.microsoft.com/.default"
+        }
+        
+        $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -Method Post -Body $body
+        $accessToken = $tokenResponse.access_token
+        
+        Write-Host "✓ Successfully acquired Fabric API access token"
+        return $accessToken
+        
+    } catch {
+        Write-Error "Failed to acquire access token: $_"
+        
+        # Fallback to Power BI API scope
+        try {
+            Write-Host "Trying Power BI API scope as fallback..."
+            $body = @{
+                grant_type    = "client_credentials"
+                client_id     = $ClientId
+                client_secret = $ClientSecret
+                resource      = "https://analysis.windows.net/powerbi/api"
+            }
+            
+            $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$TenantId/oauth2/token" -Method Post -Body $body
+            $accessToken = $tokenResponse.access_token
+            
+            Write-Host "✓ Successfully acquired Power BI API access token as fallback"
+            return $accessToken
+            
+        } catch {
+            Write-Error "Failed to acquire fallback access token: $_"
+            throw "Could not acquire any access token"
+        }
+    }
+}
+
 function Invoke-ReportDeployment {
     param(
         [Parameter(Mandatory=$true)]
@@ -84,7 +405,7 @@ function Invoke-ReportDeployment {
     )
 
     try {
-        Write-Host "Starting Power BI Report Deployment..."
+        Write-Host "Starting Power BI PBIP Report Deployment..."
         Write-Host "Environment: $Workspace"
         Write-Host "Config File: $ConfigFile"
 
@@ -114,263 +435,137 @@ function Invoke-ReportDeployment {
         Write-Host "Using Tenant ID: $tenantId"
         Write-Host "Using Client ID: $clientId"
 
-        # Define configuration paths - Updated for root-level structure
-        $config_base_path = "Configuration/$deployment_env"
-        $deployment_profile_path = "$config_base_path/DEPLOYMENT_PROFILE.csv"
-
-        # Check if deployment profile exists, if not create a default one
-        if (-not (Test-Path $deployment_profile_path)) {
-            Write-Warning "Deployment profile not found: $deployment_profile_path"
-            Write-Host "Creating default deployment profile..."
-            
-            # Create Configuration directory structure
-            $configDir = Split-Path $deployment_profile_path -Parent
-            if (-not (Test-Path $configDir)) {
-                New-Item -Path $configDir -ItemType Directory -Force | Out-Null
-                Write-Host "Created directory: $configDir"
-            }
-            
-            # Create default deployment profile
-            $defaultProfile = @"
-workspace_name,report_name,report_path,warehouse_name,environment_type,transformation_layer
-${deployment_env}Workspace1,Demo Report,Demo Report/Demo Report.pbix,WH_$deployment_env,Reporting,Reporting
-"@
-            $defaultProfile | Out-File -FilePath $deployment_profile_path -Encoding UTF8
-            Write-Host "Created default deployment profile: $deployment_profile_path"
-        }
-
-        Write-Host "Reading deployment profile: $deployment_profile_path"
-
-        # Read deployment profile CSV
-        $deployment_profile = Import-Csv -Path $deployment_profile_path
-        Write-Host "Found $($deployment_profile.Count) entries in deployment profile"
-
-        # Process the deployment profile to add workspace mapping
-        foreach ($entry in $deployment_profile) {
-            # Map workspace names based on environment
-            if ($deployment_env -eq "Dev") {
-                $entry | Add-Member -NotePropertyName "mapped_workspace_name" -NotePropertyValue "DevWorkspace1" -Force
-                $entry | Add-Member -NotePropertyName "mapped_workspace_id" -NotePropertyValue $config.DevWorkspaceID -Force
-            }
-            elseif ($deployment_env -eq "UAT") {
-                $entry | Add-Member -NotePropertyName "mapped_workspace_name" -NotePropertyValue "UATWorkspace1" -Force
-                $entry | Add-Member -NotePropertyName "mapped_workspace_id" -NotePropertyValue $config.UATWorkspaceID -Force
-            }
-            else {
-                throw "Unsupported environment: $deployment_env"
-            }
-        }
-
-        # Get Access Token
-        Write-Host "Getting access token..."
+        # Map workspace based on environment (only Dev and Prod supported)
+        $targetWorkspaceId = $null
+        $targetWorkspaceName = $null
         
-        # Alternative token acquisition method (since utility scripts may not be available)
-        $body = @{
-            grant_type    = "client_credentials"
-            client_id     = $clientId
-            client_secret = $clientSecret
-            resource      = "https://analysis.windows.net/powerbi/api"
+        switch ($deployment_env.ToUpper()) {
+            "DEV" {
+                $targetWorkspaceId = $config.DevWorkspaceID
+                $targetWorkspaceName = "Dev Workspace"
+            }
+            "PROD" {
+                # Use UATWorkspaceID as Prod workspace (update your config to have ProdWorkspaceID if needed)
+                $targetWorkspaceId = $config.UATWorkspaceID
+                $targetWorkspaceName = "Prod Workspace"
+            }
+            default {
+                throw "Unsupported environment: $deployment_env. Only DEV and PROD are supported."
+            }
         }
-        
-        try {
-            $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$tenantId/oauth2/token" -Method Post -Body $body
-            $accessToken = $tokenResponse.access_token
-            Write-Host "✓ Successfully acquired access token"
-        } catch {
-            throw "Failed to acquire access token: $_"
+
+        if (-not $targetWorkspaceId) {
+            throw "Workspace ID not found for environment: $deployment_env"
         }
-        
-        $headers = @{ Authorization = "Bearer $accessToken" }
 
-        # Secure the client secret
-        $securePassword = ConvertTo-SecureString $clientSecret -AsPlainText -Force
-        $credential = New-Object System.Management.Automation.PSCredential ($clientId, $securePassword)
+        Write-Host "Target Workspace ID: $targetWorkspaceId"
+        Write-Host "Target Workspace Name: $targetWorkspaceName"
 
-        # Set artifact path (assuming build sources directory)
+        # Get Access Token (Automatic - No manual token needed)
+        $accessToken = Get-AccessTokenFromConfig -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
+
+        # Set artifact path
         $artifactPath = $env:BUILD_SOURCESDIRECTORY
+        if (-not $artifactPath) {
+            $artifactPath = $env:artifact_path
+        }
         if (-not $artifactPath) {
             $artifactPath = (Get-Location).Path
         }
         Write-Host "Using artifact path: $artifactPath"
 
-        # Get PBIX files - Updated paths for root-level structure
-        $reportFolders = @("Demo Report", "Reporting", "Reports")
-        $allPbixFiles = @()
+        # Search for PBIP files
+        Write-Host "Searching for PBIP files..."
+        $reportFolders = @("Demo Report", "Reporting", "Reports", "PowerBI", "BI")
+        $allPbipFiles = @()
         
         foreach ($folder in $reportFolders) {
             $folderPath = Join-Path $artifactPath $folder
             if (Test-Path $folderPath) {
-                $pbixFiles = Get-PBIXFiles -ArtifactPath $artifactPath -Folder $folder
-                $allPbixFiles += $pbixFiles
-                Write-Host "Found $($pbixFiles.Count) PBIX files in $folder folder"
+                $pbipFiles = Get-PBIPFiles -ArtifactPath $artifactPath -Folder $folder
+                $allPbipFiles += $pbipFiles
+                Write-Host "Found $($pbipFiles.Count) PBIP files in $folder folder"
             }
         }
 
-        # If no PBIX files found in specific folders, search entire repository
-        if ($allPbixFiles.Count -eq 0) {
-            Write-Host "No PBIX files found in expected folders, searching entire repository..."
-            $allPbixFiles = Get-ChildItem -Path $artifactPath -Recurse -Filter "*.pbix" -ErrorAction SilentlyContinue
-            Write-Host "Found $($allPbixFiles.Count) PBIX files total"
+        # If no PBIP files found in specific folders, search entire repository
+        if ($allPbipFiles.Count -eq 0) {
+            Write-Host "No PBIP files found in expected folders, searching entire repository..."
+            $allPbipFiles = Get-ChildItem -Path $artifactPath -Recurse -Filter "*.pbip" -ErrorAction SilentlyContinue
+            Write-Host "Found $($allPbipFiles.Count) PBIP files total"
         }
 
         # List found files for debugging
-        foreach ($file in $allPbixFiles) {
-            Write-Host "  Found PBIX file: $($file.FullName)"
+        foreach ($file in $allPbipFiles) {
+            Write-Host "  Found PBIP file: $($file.FullName)"
         }
 
-        if ($allPbixFiles.Count -eq 0) {
-            Write-Warning "No PBIX files found. Looking for PBIP files..."
-            $pbipFiles = Get-ChildItem -Path $artifactPath -Recurse -Filter "*.pbip" -ErrorAction SilentlyContinue
-            Write-Host "Found $($pbipFiles.Count) PBIP files"
-            foreach ($file in $pbipFiles) {
-                Write-Host "  Found PBIP file: $($file.FullName)"
-            }
-            
-            if ($pbipFiles.Count -eq 0) {
-                throw "No Power BI report files (.pbix or .pbip) found in the repository"
-            }
+        if ($allPbipFiles.Count -eq 0) {
+            throw "No PBIP files found in the repository"
         }
 
-        # Connect to Power BI
-        Write-Host "Connecting to Power BI Service..."
+        Write-Host "`n=== PBIP DEPLOYMENT ==="
+        $deploymentResults = @()
         
-        try {
-            Connect-PowerBIServiceAccount -ServicePrincipal -TenantId $tenantId -Credential $credential
-            Write-Host "✓ Successfully connected to Power BI Service"
-        } catch {
-            Write-Error "Failed to connect to Power BI Service: $_"
-            throw
-        }
-
-        # Get all Power BI workspaces
-        $allWorkspaces = Get-PowerBIWorkspace -All
-        Write-Host "Retrieved $($allWorkspaces.Count) workspaces"
-
-        # Initialize variables
-        $workspaceDatasetInfo = @{}
-        $WaitTillPowerBIDatasetRefresh = "True"
-        $workspaceDetails = @()
-
-        # Get unique workspaces from deployment profile
-        $uniqueWorkspaces = $deployment_profile | Select-Object mapped_workspace_name, mapped_workspace_id -Unique
-
-        foreach ($wsInfo in $uniqueWorkspaces) {
-            $workspace = $allWorkspaces | Where-Object { $_.Id -eq $wsInfo.mapped_workspace_id }
+        foreach ($pbipFile in $allPbipFiles) {
+            $reportName = [System.IO.Path]::GetFileNameWithoutExtension($pbipFile.Name)
+            Write-Host "`nProcessing PBIP: $reportName"
+            Write-Host "File path: $($pbipFile.FullName)"
             
-            if ($workspace) {
-                Write-Host "Found workspace: $($workspace.Name) (ID: $($workspace.Id))"
-                
-                $workspaceDetails += @{
-                    Id   = $workspace.Id
-                    Name = $workspace.Name
-                }
+            # Deploy using Fabric API
+            $deploymentSuccess = Deploy-PBIPUsingFabricAPI -PBIPFilePath $pbipFile.FullName -ReportName $reportName -WorkspaceId $targetWorkspaceId -AccessToken $accessToken
+            
+            $result = [PSCustomObject]@{
+                ReportName = $reportName
+                FilePath = $pbipFile.FullName
+                DeploymentSuccess = $deploymentSuccess
+                Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                Environment = $deployment_env
+                WorkspaceId = $targetWorkspaceId
+            }
+            
+            $deploymentResults += $result
+            
+            if ($deploymentSuccess) {
+                Write-Host "✓ Successfully deployed: $reportName"
             } else {
-                Write-Warning "Workspace not found: $($wsInfo.mapped_workspace_name) (ID: $($wsInfo.mapped_workspace_id))"
+                Write-Warning "❌ Failed to deploy: $reportName"
             }
         }
 
-        # Process each workspace
-        foreach ($entry in $workspaceDetails) {
-            $workspaceId = $entry.Id
-            $workspaceName = $entry.Name
+        # Summary
+        Write-Host "`n=== DEPLOYMENT SUMMARY ==="
+        $successCount = ($deploymentResults | Where-Object { $_.DeploymentSuccess }).Count
+        $totalCount = $deploymentResults.Count
+        
+        Write-Host "Total PBIP files processed: $totalCount"
+        Write-Host "Successful deployments: $successCount"
+        Write-Host "Failed deployments: $($totalCount - $successCount)"
+        Write-Host "Environment: $deployment_env"
+        Write-Host "Target Workspace: $targetWorkspaceId"
 
-            Write-Host "`nProcessing workspace: $workspaceName (ID: $workspaceId)"
+        # Export results for troubleshooting
+        $resultsPath = Join-Path $artifactPath "deployment_results.json"
+        $deploymentResults | ConvertTo-Json -Depth 5 | Out-File -FilePath $resultsPath -Encoding UTF8
+        Write-Host "Deployment results saved to: $resultsPath"
 
-            # Use all found PBIX files
-            $PbixFiles = $allPbixFiles
-            $workspaceType = "reports"
-
-            Write-Host "Workspace type: $workspaceType"
-            Write-Host "PBIX files to process: $($PbixFiles.Count)"
-
-            try {
-                # Process PBIX files
-                foreach ($file in $PbixFiles) {
-                    $PowerBIReportFilePath = $file.FullName
-                    $reportName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-
-                    Write-Host "`n  Processing report: $reportName"
-                    Write-Host "  File path: $PowerBIReportFilePath"
-
-                    try {
-                        # Deploy Report using PowerShell module method
-                        Write-Host "  Deploying report..."
-                        
-                        try {
-                            New-PowerBIReport -Path $PowerBIReportFilePath -Name $reportName -WorkspaceId $workspaceId
-                            Write-Host "  ✓ Report deployed successfully"
-                        } catch {
-                            if ($_.Exception.Message -like "*already exists*") {
-                                Write-Host "  ℹ Report already exists, attempting to update..."
-                                # Try to get the existing report and update it
-                                $existingReports = Get-PowerBIReport -WorkspaceId $workspaceId | Where-Object { $_.Name -eq $reportName }
-                                if ($existingReports) {
-                                    Write-Host "  ℹ Found existing report, skipping deployment"
-                                } else {
-                                    throw $_
-                                }
-                            } else {
-                                throw $_
-                            }
-                        }
-
-                        # Get Dataset
-                        Write-Host "  Getting dataset..."
-                        Start-Sleep -Seconds 5  # Wait for deployment to complete
-                        $dataset = Get-PowerBIDataset -WorkspaceId $workspaceId | Where-Object { $_.Name -eq $reportName }
-                        if (-not $dataset) {
-                            Write-Warning "Dataset $reportName not found in workspace $workspaceId"
-                            continue
-                        }
-                        $datasetId = $dataset.Id
-                        Write-Host "  Dataset ID: $datasetId"
-
-                        # Take Over Dataset
-                        Write-Host "  Taking over dataset..."
-                        try {
-                            $takeoverUrl = "https://api.powerbi.com/v1.0/myorg/groups/$workspaceId/datasets/$datasetId/Default.TakeOver"
-                            Invoke-PowerBIRestMethod -Method Post -Url $takeoverUrl
-                            Write-Host "  ✓ Dataset takeover successful"
-                        } catch {
-                            Write-Warning "Could not take over dataset (this may be normal): $_"
-                        }
-
-                        # Refresh Dataset
-                        Write-Host "  Refreshing dataset..."
-                        try {
-                            $refreshUrl = "https://api.powerbi.com/v1.0/myorg/groups/$workspaceId/datasets/$datasetId/refreshes"
-                            Invoke-PowerBIRestMethod -Method Post -Url $refreshUrl
-                            Write-Host "  ✓ Dataset refresh initiated successfully"
-                        } catch {
-                            Write-Warning "Could not refresh dataset: $_"
-                        }
-
-                        Write-Host "  ✓ Report $reportName processed successfully"
-                    }
-                    catch {
-                        Write-Error "  ✗ Failed to process report $reportName : $_"
-                        # Continue with other reports instead of failing completely
-                        continue
-                    }
-                }
-            }
-            catch {
-                Write-Error "Failed to process workspace $workspaceName : $_"
-                throw
-            }
+        # Fail the deployment if any PBIP file failed to deploy
+        if ($successCount -lt $totalCount) {
+            $failedReports = $deploymentResults | Where-Object { -not $_.DeploymentSuccess } | Select-Object -ExpandProperty ReportName
+            Write-Error "The following reports failed to deploy: $($failedReports -join ', ')"
+            throw "One or more PBIP deployments failed"
         }
 
-        Write-Host "`n✓ Power BI Report Deployment completed successfully!"
+        Write-Host "`n✓ Power BI PBIP Report Deployment completed successfully!"
     }
     catch {
-        Write-Error "Power BI Report Deployment failed: $_"
+        Write-Error "Power BI PBIP Report Deployment failed: $_"
         throw
     }
 }
 
 # Main execution
 if ($MyInvocation.InvocationName -ne '.') {
-    # Get parameters from command line arguments
     param(
         [Parameter(Mandatory=$true)]
         [string]$Workspace,
@@ -383,7 +578,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         Invoke-ReportDeployment -Workspace $Workspace -ConfigFile $ConfigFile
     }
     catch {
-        Write-Error "An error occurred while orchestrating Power BI Deployment: $_"
+        Write-Error "An error occurred while orchestrating PBIP Power BI Deployment: $_"
         exit 1
     }
 }

@@ -1,142 +1,212 @@
 trigger: none
 
-pool:
-  vmImage: 'windows-latest'
+parameters:
+- name: Deployment_Environment
+  displayName: "Deployment_Environment"
+  type: string
+  default: "DEV"
+  values:
+    - "DEV"
+    - "PROD"
+- name: App_Id 
+  displayName: "App_Id"
+  type: string
+  default: "T360"
+  values:
+    - "T360"
+- name: Environment_Type
+  displayName: "Environment_Type"
+  type: string
+  default: "Primary"
+  values:
+    - "Primary"
+    - "Secondary"
+- name: Build_Package_Version
+  displayName: "Build Package Version"
+  type: string
+  default: ""
+- name: Build_Pipeline_Build_Number
+  displayName: "Build Pipeline Build Number"
+  type: string
+  default: ""
+- name: Run_Operations
+  displayName: "Deploy_Operations_Dashboard"
+  type: boolean
+  default: false
+- name: Run_Semantic_Model
+  displayName: "Deploy_Semantic_Models"
+  type: boolean
+  default: false
 
 variables:
-  artifact_path: '$(Build.ArtifactStagingDirectory)'
-  deployment_env: 'Dev'
-  config_file: 'config.json'  # Updated - file is at root level
+  - template: /DevOps/CONFIG/T360-UDP-CONFIG_${{parameters.Deployment_Environment}}.yml
+  - name: config_file
+    value: 'config.json'
 
-jobs:
-- job: DeployPowerBIReports
-  displayName: 'Deploy Power BI Reports'
-  steps:
-    # Step 1: Install .NET SDK
-    - task: UseDotNet@2
-      displayName: 'Install .NET SDK'
-      inputs:
-        packageType: 'sdk'
-        version: '5.x'
+stages:
+- stage: Approval_Stage_${{parameters.Deployment_Environment}}
+  jobs:
+  - deployment: Approval
+    environment: UDP-${{parameters.Deployment_Environment}}-Deploy
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo "Approve"
 
-    # Step 2: Install Power BI Desktop
-    - task: PowerShell@2
-      displayName: 'Install Power BI Desktop'
-      inputs:
-        targetType: 'inline'
-        script: |
-          Write-Host "Installing Power BI Desktop via winget..."
-          try {
-              winget install --id Microsoft.PowerBI --silent --accept-package-agreements --accept-source-agreements
-              Write-Host "✓ Power BI Desktop installed successfully"
-          } catch {
-              Write-Warning "Winget installation failed, continuing: $_"
-          }
-        continueOnError: true
+- stage: DeployPBIPToWorkspace
+  displayName: "PBIP Deployment Stage"
+  jobs:
+    - job: DeployPowerBIReports
+      timeoutInMinutes: 360
+      displayName: "Deploy Power BI PBIP Reports"
+      pool:
+        vmImage: "windows-latest"
+      steps:
+        # Step: Azure Key Vault to retrieve secrets
+        - task: AzureKeyVault@2
+          displayName: "Azure Key Vault: ${{ variables.KeyVaultName }}"
+          inputs:
+            azureSubscription: ${{ variables.AdfAzureServiceConnection }}
+            KeyVaultName: ${{ variables.KeyVaultName }}
+            SecretsFilter: |
+              ${{ variables.SpnSecretName }},
+              ${{ variables.UpnSecretName }}
 
-    # Step 3: Install PowerShell Modules
-    - task: PowerShell@2
-      displayName: 'Install Required PowerShell Modules'
-      inputs:
-        targetType: 'inline'
-        script: |
-          Write-Host "Installing required PowerShell modules..."
-          $modules = @('MicrosoftPowerBIMgmt')
-          
-          foreach ($module in $modules) {
-              Write-Host "Installing module: $module"
-              try {
-                  Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser -SkipPublisherCheck -Repository PSGallery -Confirm:$false
-                  Import-Module -Name $module -Force
-                  Write-Host "✓ Module $module installed successfully"
-              } catch {
-                  Write-Warning "Failed to install $module : $_"
-              }
-          }
-        pwsh: true
-        errorActionPreference: 'continue'
+        # Step: Install .NET SDK
+        - task: UseDotNet@2
+          displayName: 'Install .NET SDK'
+          inputs:
+            packageType: 'sdk'
+            version: '6.x'
 
-    # Step 4: Verify Files and Structure
-    - task: PowerShell@2
-      displayName: 'Verify Files and Structure'
-      inputs:
-        targetType: 'inline'
-        script: |
-          Write-Host "=== FILE VERIFICATION ==="
-          Write-Host "Build Sources Directory: $(Build.SourcesDirectory)"
-          
-          # Check for script file
-          $scriptPath = "$(Build.SourcesDirectory)\Scripts\MainOrchestrator.ps1"
-          Write-Host "Checking script at: $scriptPath"
-          if (Test-Path $scriptPath) {
-              Write-Host "✅ Script found"
-              Write-Host "Script size: $((Get-Item $scriptPath).Length) bytes"
-          } else {
-              Write-Host "❌ Script not found"
-          }
-          
-          # Check for config file
-          $configPath = "$(Build.SourcesDirectory)\config.json"
-          Write-Host "Checking config at: $configPath"
-          if (Test-Path $configPath) {
-              Write-Host "✅ Config found"
-              Write-Host "Config size: $((Get-Item $configPath).Length) bytes"
+        # Step: Install PowerShell Modules
+        - task: PowerShell@2
+          displayName: 'Install Required PowerShell Modules'
+          inputs:
+            targetType: 'inline'
+            script: |
+              Write-Host "Installing required PowerShell modules..."
+              $modules = @('MicrosoftPowerBIMgmt', 'Az.Accounts', 'Az.Profile')
               
-              # Show config content (masked)
-              try {
-                  $config = Get-Content $configPath | ConvertFrom-Json
-                  Write-Host "Config contains:"
-                  Write-Host "  - TenantID: $($config.TenantID)"
-                  Write-Host "  - ClientID: $($config.ClientID)"
-                  Write-Host "  - DevWorkspaceID: $($config.DevWorkspaceID)"
-                  Write-Host "  - UATWorkspaceID: $($config.UATWorkspaceID)"
-              } catch {
-                  Write-Warning "Could not parse config file: $_"
+              foreach ($module in $modules) {
+                  Write-Host "Installing module: $module"
+                  try {
+                      Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser -SkipPublisherCheck -Repository PSGallery -Confirm:$false
+                      Import-Module -Name $module -Force
+                      Write-Host "✓ Module $module installed successfully"
+                  } catch {
+                      Write-Warning "Failed to install $module : $_"
+                  }
               }
-          } else {
-              Write-Host "❌ Config not found"
-          }
-          
-          # List Scripts folder contents
-          $scriptsDir = "$(Build.SourcesDirectory)\Scripts"
-          if (Test-Path $scriptsDir) {
-              Write-Host "`nScripts folder contents:"
-              Get-ChildItem $scriptsDir | ForEach-Object {
-                  Write-Host "  - $($_.Name) ($($_.Length) bytes)"
+            pwsh: true
+            errorActionPreference: 'continue'
+
+        # Step: Download artifacts from previous build pipeline
+        - task: UniversalPackages@0
+          displayName: "Download Artifacts from Azure Artifact"
+          inputs:
+            command: download
+            vstsFeed: '${{variables.vstsFeedPublish}}'
+            vstsFeedPackage: '${{ variables.ADOProjectName }}_${{ variables.vstspackageFeedName }}_build_${{ variables.targetBranch }}'
+            vstsPackageVersion: ${{ parameters.Build_Package_Version }}
+            downloadDirectory: "$(Build.SourcesDirectory)/ELM"
+
+        # Step: Verify Files and Structure
+        - task: PowerShell@2
+          displayName: 'Verify Files and Structure'
+          inputs:
+            targetType: 'inline'
+            script: |
+              Write-Host "=== FILE VERIFICATION ==="
+              Write-Host "Build Sources Directory: $(Build.SourcesDirectory)"
+              
+              # Check for script file
+              $scriptPath = "$(Build.SourcesDirectory)\ELM\Scripts\MainOrchestrator.ps1"
+              Write-Host "Checking script at: $scriptPath"
+              if (Test-Path $scriptPath) {
+                  Write-Host "✅ Script found"
+                  Write-Host "Script size: $((Get-Item $scriptPath).Length) bytes"
+              } else {
+                  Write-Host "❌ Script not found at expected location"
+                  # Look for script in other locations
+                  $alternativeScripts = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*Orchestrator*.ps1" -ErrorAction SilentlyContinue
+                  if ($alternativeScripts) {
+                      Write-Host "Found orchestrator scripts at:"
+                      foreach ($script in $alternativeScripts) {
+                          Write-Host "  - $($script.FullName)"
+                      }
+                  }
               }
-          }
-          
-          # Look for PBIX/PBIP files
-          Write-Host "`n=== REPORT FILES ==="
-          $pbixFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*.pbix" -ErrorAction SilentlyContinue
-          Write-Host "PBIX files found: $($pbixFiles.Count)"
-          foreach ($file in $pbixFiles) {
-              Write-Host "  - $($file.FullName)"
-          }
-          
-          $pbipFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*.pbip" -ErrorAction SilentlyContinue
-          Write-Host "PBIP files found: $($pbipFiles.Count)"
-          foreach ($file in $pbipFiles) {
-              Write-Host "  - $($file.FullName)"
-          }
-        pwsh: true
-        continueOnError: true
+              
+              # Check for config file
+              $configPath = "$(Build.SourcesDirectory)\ELM\$(config_file)"
+              Write-Host "Checking config at: $configPath"
+              if (Test-Path $configPath) {
+                  Write-Host "✅ Config found"
+                  Write-Host "Config size: $((Get-Item $configPath).Length) bytes"
+                  
+                  # Show config content (masked)
+                  try {
+                      $config = Get-Content $configPath | ConvertFrom-Json
+                      Write-Host "Config contains:"
+                      Write-Host "  - TenantID: $($config.TenantID)"
+                      Write-Host "  - ClientID: $($config.ClientID)"
+                      Write-Host "  - DevWorkspaceID: $($config.DevWorkspaceID)"
+                      if ($config.UATWorkspaceID) {
+                          Write-Host "  - UATWorkspaceID: $($config.UATWorkspaceID)"
+                      }
+                  } catch {
+                      Write-Warning "Could not parse config file: $_"
+                  }
+              } else {
+                  Write-Host "❌ Config not found"
+              }
+              
+              # Look for PBIP files
+              Write-Host "`n=== PBIP REPORT FILES ==="
+              $pbipFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*.pbip" -ErrorAction SilentlyContinue
+              Write-Host "PBIP files found: $($pbipFiles.Count)"
+              foreach ($file in $pbipFiles) {
+                  Write-Host "  - $($file.FullName)"
+                  
+                  # Check for associated folders
+                  $parentDir = $file.Directory.FullName
+                  $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+                  $reportFolder = Join-Path $parentDir "$baseName.Report"
+                  $semanticModelFolder = Join-Path $parentDir "$baseName.SemanticModel"
+                  
+                  Write-Host "    Report folder exists: $(Test-Path $reportFolder)"
+                  Write-Host "    SemanticModel folder exists: $(Test-Path $semanticModelFolder)"
+              }
+            pwsh: true
+            continueOnError: true
 
-    # Step 5: Run PowerShell Script with Correct Method
-    - task: PowerShell@2
-      displayName: 'Deploy Power BI Reports'
-      inputs:
-        targetType: 'filePath'
-        filePath: '$(Build.SourcesDirectory)\Scripts\MainOrchestrator.ps1'  # Correct path without /Visa
-        arguments: '-Workspace "$(deployment_env)" -ConfigFile "$(Build.SourcesDirectory)\$(config_file)"'
-        pwsh: true
-        workingDirectory: '$(Build.SourcesDirectory)'
-        errorActionPreference: 'stop'
+        # Step: Run PowerShell orchestrator script
+        - task: PowerShell@2
+          displayName: 'Deploy PBIP Reports'
+          inputs:
+            targetType: 'filePath'
+            filePath: '$(Build.SourcesDirectory)\ELM\Scripts\MainOrchestrator.ps1'
+            arguments: '-Workspace "${{parameters.Deployment_Environment}}" -ConfigFile "$(Build.SourcesDirectory)\ELM\$(config_file)"'
+            pwsh: true
+            workingDirectory: '$(Build.SourcesDirectory)\ELM'
+            errorActionPreference: 'stop'
+          env:
+            udp_t360_spn: $(udp-t360-spn)
+            udp_t360_upn: $(udp-t360-upn)
+            deployment_env: ${{parameters.Deployment_Environment}}
+            environment_type: ${{parameters.Environment_Type}}
+            artifact_path: "$(Build.SourcesDirectory)/ELM"
+            build_number: ${{parameters.Build_Pipeline_Build_Number}}
+            app_id: ${{parameters.App_Id}}
+            operations: ${{parameters.Run_Operations}}
+            reporting: ${{parameters.Run_Semantic_Model}}
 
-    # Step 6: Publish artifacts
-    - task: PublishBuildArtifacts@1
-      displayName: 'Publish Artifacts'
-      inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-        ArtifactName: 'drop'
-        publishLocation: 'Container'
+        # Step: Publish artifacts
+        - task: PublishBuildArtifacts@1
+          displayName: 'Publish Deployment Artifacts'
+          inputs:
+            PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+            ArtifactName: 'pbip-deployment-logs'
+            publishLocation: 'Container'
