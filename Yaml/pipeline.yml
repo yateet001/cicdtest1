@@ -6,6 +6,7 @@ pool:
 variables:
   artifact_path: '$(Build.ArtifactStagingDirectory)'
   deployment_env: 'Dev'
+  config_file: 'config.json'  # Updated - file is at root level
 
 jobs:
 - job: DeployPowerBIReports
@@ -24,12 +25,12 @@ jobs:
       inputs:
         targetType: 'inline'
         script: |
-          Write-Host "Installing Power BI Desktop via winget (fastest method)..."
+          Write-Host "Installing Power BI Desktop via winget..."
           try {
               winget install --id Microsoft.PowerBI --silent --accept-package-agreements --accept-source-agreements
               Write-Host "✓ Power BI Desktop installed successfully"
           } catch {
-              Write-Warning "Winget installation failed, continuing without Power BI Desktop: $_"
+              Write-Warning "Winget installation failed, continuing: $_"
           }
         continueOnError: true
 
@@ -55,169 +56,84 @@ jobs:
         pwsh: true
         errorActionPreference: 'continue'
 
-    # Step 4: Smart File Discovery and Deployment
+    # Step 4: Verify Files and Structure
     - task: PowerShell@2
-      displayName: 'Smart File Discovery and Deployment'
+      displayName: 'Verify Files and Structure'
       inputs:
         targetType: 'inline'
         script: |
-          Write-Host "=== SMART FILE DISCOVERY AND DEPLOYMENT ==="
+          Write-Host "=== FILE VERIFICATION ==="
           Write-Host "Build Sources Directory: $(Build.SourcesDirectory)"
-          Write-Host "Deployment Environment: $(deployment_env)"
           
-          # Function to find files
-          function Find-File {
-              param($FileName, $SearchPath)
+          # Check for script file
+          $scriptPath = "$(Build.SourcesDirectory)\Scripts\MainOrchestrator.ps1"
+          Write-Host "Checking script at: $scriptPath"
+          if (Test-Path $scriptPath) {
+              Write-Host "✅ Script found"
+              Write-Host "Script size: $((Get-Item $scriptPath).Length) bytes"
+          } else {
+              Write-Host "❌ Script not found"
+          }
+          
+          # Check for config file
+          $configPath = "$(Build.SourcesDirectory)\config.json"
+          Write-Host "Checking config at: $configPath"
+          if (Test-Path $configPath) {
+              Write-Host "✅ Config found"
+              Write-Host "Config size: $((Get-Item $configPath).Length) bytes"
               
-              Write-Host "`nSearching for: $FileName"
-              $found = Get-ChildItem -Path $SearchPath -Recurse -Filter $FileName -ErrorAction SilentlyContinue | Select-Object -First 1
-              
-              if ($found) {
-                  Write-Host "✅ Found: $($found.FullName)"
-                  return $found.FullName
-              } else {
-                  Write-Host "❌ Not found: $FileName"
-                  return $null
+              # Show config content (masked)
+              try {
+                  $config = Get-Content $configPath | ConvertFrom-Json
+                  Write-Host "Config contains:"
+                  Write-Host "  - TenantID: $($config.TenantID)"
+                  Write-Host "  - ClientID: $($config.ClientID)"
+                  Write-Host "  - DevWorkspaceID: $($config.DevWorkspaceID)"
+                  Write-Host "  - UATWorkspaceID: $($config.UATWorkspaceID)"
+              } catch {
+                  Write-Warning "Could not parse config file: $_"
+              }
+          } else {
+              Write-Host "❌ Config not found"
+          }
+          
+          # List Scripts folder contents
+          $scriptsDir = "$(Build.SourcesDirectory)\Scripts"
+          if (Test-Path $scriptsDir) {
+              Write-Host "`nScripts folder contents:"
+              Get-ChildItem $scriptsDir | ForEach-Object {
+                  Write-Host "  - $($_.Name) ($($_.Length) bytes)"
               }
           }
           
-          # Search for required files
-          $buildDir = "$(Build.SourcesDirectory)"
-          $scriptPath = Find-File "MainOrchestrator.ps1" $buildDir
-          $configPath = Find-File "config.json" $buildDir
-          
-          # Alternative search patterns
-          if (-not $scriptPath) {
-              Write-Host "`nTrying alternative script names..."
-              $alternativeScripts = @("*.ps1")
-              foreach ($pattern in $alternativeScripts) {
-                  $found = Get-ChildItem -Path $buildDir -Recurse -Filter $pattern -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*orchestrat*" -or $_.Name -like "*deploy*" -or $_.Name -like "*main*" }
-                  if ($found) {
-                      $scriptPath = $found[0].FullName
-                      Write-Host "✅ Found alternative script: $scriptPath"
-                      break
-                  }
-              }
+          # Look for PBIX/PBIP files
+          Write-Host "`n=== REPORT FILES ==="
+          $pbixFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*.pbix" -ErrorAction SilentlyContinue
+          Write-Host "PBIX files found: $($pbixFiles.Count)"
+          foreach ($file in $pbixFiles) {
+              Write-Host "  - $($file.FullName)"
           }
           
-          # Check if we have the minimum required files
-          if (-not $scriptPath) {
-              Write-Host "❌ No PowerShell deployment script found!"
-              Write-Host "`n=== AVAILABLE FILES ==="
-              Get-ChildItem -Path $buildDir -Recurse -Filter "*.ps1" | ForEach-Object { Write-Host "PS1 File: $($_.FullName)" }
-              Get-ChildItem -Path $buildDir -Recurse -Filter "*.json" | ForEach-Object { Write-Host "JSON File: $($_.FullName)" }
-              
-              # Create a simple deployment script inline
-              Write-Host "`n=== CREATING INLINE DEPLOYMENT SCRIPT ==="
-              $inlineScript = @'
-          param(
-              [string]$Workspace = "Dev",
-              [string]$ConfigFile
-          )
-          
-          Write-Host "=== INLINE POWER BI DEPLOYMENT SCRIPT ==="
-          Write-Host "Workspace: $Workspace"
-          Write-Host "Config File: $ConfigFile"
-          
-          try {
-              # Install and import PowerBI module if not available
-              if (-not (Get-Module -Name MicrosoftPowerBIMgmt -ListAvailable)) {
-                  Install-Module -Name MicrosoftPowerBIMgmt -Force -AllowClobber -Scope CurrentUser
-              }
-              Import-Module MicrosoftPowerBIMgmt -Force
-              
-              # Read config
-              if (Test-Path $ConfigFile) {
-                  $config = Get-Content $ConfigFile | ConvertFrom-Json
-                  Write-Host "✅ Config loaded successfully"
-                  
-                  # Display config (without sensitive data)
-                  Write-Host "Tenant ID: $($config.TenantID)"
-                  Write-Host "Client ID: $($config.ClientID)"
-                  Write-Host "Dev Workspace ID: $($config.DevWorkspaceID)"
-                  Write-Host "UAT Workspace ID: $($config.UATWorkspaceID)"
-              } else {
-                  throw "Config file not found: $ConfigFile"
-              }
-              
-              # Look for PBIX files
-              $pbixFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*.pbix" -ErrorAction SilentlyContinue
-              Write-Host "`nFound $($pbixFiles.Count) PBIX files:"
-              foreach ($file in $pbixFiles) {
-                  Write-Host "  - $($file.FullName)"
-              }
-              
-              if ($pbixFiles.Count -eq 0) {
-                  Write-Warning "No PBIX files found. Looking for PBIP files..."
-                  $pbipFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*.pbip" -ErrorAction SilentlyContinue
-                  Write-Host "Found $($pbipFiles.Count) PBIP files:"
-                  foreach ($file in $pbipFiles) {
-                      Write-Host "  - $($file.FullName)"
-                  }
-              }
-              
-              # Try to connect to Power BI (this will show if credentials work)
-              Write-Host "`nTesting Power BI connection..."
-              $securePassword = ConvertTo-SecureString $config.ClientSecret -AsPlainText -Force
-              $credential = New-Object System.Management.Automation.PSCredential ($config.ClientID, $securePassword)
-              
-              Connect-PowerBIServiceAccount -ServicePrincipal -TenantId $config.TenantID -Credential $credential
-              Write-Host "✅ Successfully connected to Power BI Service"
-              
-              # List workspaces
-              $workspaces = Get-PowerBIWorkspace -All
-              Write-Host "`nFound $($workspaces.Count) workspaces"
-              
-              # Find target workspace
-              $targetWorkspaceId = if ($Workspace -eq "Dev") { $config.DevWorkspaceID } else { $config.UATWorkspaceID }
-              $targetWorkspace = $workspaces | Where-Object { $_.Id -eq $targetWorkspaceId }
-              
-              if ($targetWorkspace) {
-                  Write-Host "✅ Found target workspace: $($targetWorkspace.Name) (ID: $($targetWorkspace.Id))"
-              } else {
-                  Write-Warning "❌ Target workspace not found for environment: $Workspace"
-              }
-              
-              Write-Host "`n✅ Deployment script validation completed successfully!"
-              
-          } catch {
-              Write-Error "❌ Deployment failed: $_"
-              throw
-          }
-          '@
-              
-              # Execute inline script
-              $configPath = if ($configPath) { $configPath } else { "$(Build.SourcesDirectory)\config.json" }
-              Invoke-Expression $inlineScript
-              
-              return
-          }
-          
-          if (-not $configPath) {
-              Write-Error "❌ No config.json file found!"
-              return
-          }
-          
-          # Execute the found script
-          Write-Host "`n=== EXECUTING DEPLOYMENT SCRIPT ==="
-          Write-Host "Script: $scriptPath"
-          Write-Host "Config: $configPath"
-          
-          try {
-              $scriptDir = Split-Path $scriptPath -Parent
-              Set-Location $scriptDir
-              
-              & $scriptPath -Workspace "$(deployment_env)" -ConfigFile $configPath
-              Write-Host "✅ Deployment completed successfully!"
-              
-          } catch {
-              Write-Error "❌ Deployment failed: $_"
-              throw
+          $pbipFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "*.pbip" -ErrorAction SilentlyContinue
+          Write-Host "PBIP files found: $($pbipFiles.Count)"
+          foreach ($file in $pbipFiles) {
+              Write-Host "  - $($file.FullName)"
           }
         pwsh: true
-        workingDirectory: '$(Build.SourcesDirectory)'
+        continueOnError: true
 
-    # Step 5: Publish artifacts
+    # Step 5: Run PowerShell Script with Correct Method
+    - task: PowerShell@2
+      displayName: 'Deploy Power BI Reports'
+      inputs:
+        targetType: 'filePath'
+        filePath: '$(Build.SourcesDirectory)\Scripts\MainOrchestrator.ps1'  # Correct path without /Visa
+        arguments: '-Workspace "$(deployment_env)" -ConfigFile "$(Build.SourcesDirectory)\$(config_file)"'
+        pwsh: true
+        workingDirectory: '$(Build.SourcesDirectory)'
+        errorActionPreference: 'stop'
+
+    # Step 6: Publish artifacts
     - task: PublishBuildArtifacts@1
       displayName: 'Publish Artifacts'
       inputs:

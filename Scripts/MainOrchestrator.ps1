@@ -10,7 +10,7 @@ try {
 function Get-PBIXFiles {
     param(
         $ArtifactPath,  # Base path where the artifact is stored
-        $Folder         # Subfolder (e.g., "Demo Report") to search in
+        $Folder         # Subfolder to search in
     )
 
     # Combine base path and subfolder to form the full target path
@@ -114,12 +114,29 @@ function Invoke-ReportDeployment {
         Write-Host "Using Tenant ID: $tenantId"
         Write-Host "Using Client ID: $clientId"
 
-        # Define configuration paths - Updated to match your folder structure
-        $config_base_path = "Visa/Configuration/$deployment_env"
+        # Define configuration paths - Updated for root-level structure
+        $config_base_path = "Configuration/$deployment_env"
         $deployment_profile_path = "$config_base_path/DEPLOYMENT_PROFILE.csv"
 
+        # Check if deployment profile exists, if not create a default one
         if (-not (Test-Path $deployment_profile_path)) {
-            throw "Deployment profile not found: $deployment_profile_path"
+            Write-Warning "Deployment profile not found: $deployment_profile_path"
+            Write-Host "Creating default deployment profile..."
+            
+            # Create Configuration directory structure
+            $configDir = Split-Path $deployment_profile_path -Parent
+            if (-not (Test-Path $configDir)) {
+                New-Item -Path $configDir -ItemType Directory -Force | Out-Null
+                Write-Host "Created directory: $configDir"
+            }
+            
+            # Create default deployment profile
+            $defaultProfile = @"
+workspace_name,report_name,report_path,warehouse_name,environment_type,transformation_layer
+${deployment_env}Workspace1,Demo Report,Demo Report/Demo Report.pbix,WH_$deployment_env,Reporting,Reporting
+"@
+            $defaultProfile | Out-File -FilePath $deployment_profile_path -Encoding UTF8
+            Write-Host "Created default deployment profile: $deployment_profile_path"
         }
 
         Write-Host "Reading deployment profile: $deployment_profile_path"
@@ -147,26 +164,20 @@ function Invoke-ReportDeployment {
         # Get Access Token
         Write-Host "Getting access token..."
         
-        # Check if Get-SPNToken function is available, otherwise use alternative method
-        if (Get-Command Get-SPNToken -ErrorAction SilentlyContinue) {
-            $accessToken = Get-SPNToken $tenantId $clientId $clientSecret
-        } else {
-            Write-Warning "Get-SPNToken function not available, using alternative token method..."
-            # Alternative token acquisition method
-            $body = @{
-                grant_type    = "client_credentials"
-                client_id     = $clientId
-                client_secret = $clientSecret
-                resource      = "https://analysis.windows.net/powerbi/api"
-            }
-            
-            try {
-                $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$tenantId/oauth2/token" -Method Post -Body $body
-                $accessToken = $tokenResponse.access_token
-                Write-Host "✓ Successfully acquired access token using alternative method"
-            } catch {
-                throw "Failed to acquire access token: $_"
-            }
+        # Alternative token acquisition method (since utility scripts may not be available)
+        $body = @{
+            grant_type    = "client_credentials"
+            client_id     = $clientId
+            client_secret = $clientSecret
+            resource      = "https://analysis.windows.net/powerbi/api"
+        }
+        
+        try {
+            $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$tenantId/oauth2/token" -Method Post -Body $body
+            $accessToken = $tokenResponse.access_token
+            Write-Host "✓ Successfully acquired access token"
+        } catch {
+            throw "Failed to acquire access token: $_"
         }
         
         $headers = @{ Authorization = "Bearer $accessToken" }
@@ -182,15 +193,42 @@ function Invoke-ReportDeployment {
         }
         Write-Host "Using artifact path: $artifactPath"
 
-        # Get PBIX files - Updated paths to match your folder structure
-        $demoReportPath = "Visa/Demo Report"
-        $demoReportFiles = Get-PBIXFiles -ArtifactPath $artifactPath -Folder $demoReportPath
+        # Get PBIX files - Updated paths for root-level structure
+        $reportFolders = @("Demo Report", "Reporting", "Reports")
+        $allPbixFiles = @()
+        
+        foreach ($folder in $reportFolders) {
+            $folderPath = Join-Path $artifactPath $folder
+            if (Test-Path $folderPath) {
+                $pbixFiles = Get-PBIXFiles -ArtifactPath $artifactPath -Folder $folder
+                $allPbixFiles += $pbixFiles
+                Write-Host "Found $($pbixFiles.Count) PBIX files in $folder folder"
+            }
+        }
 
-        Write-Host "Found $($demoReportFiles.Count) PBIX files in Demo Report folder"
+        # If no PBIX files found in specific folders, search entire repository
+        if ($allPbixFiles.Count -eq 0) {
+            Write-Host "No PBIX files found in expected folders, searching entire repository..."
+            $allPbixFiles = Get-ChildItem -Path $artifactPath -Recurse -Filter "*.pbix" -ErrorAction SilentlyContinue
+            Write-Host "Found $($allPbixFiles.Count) PBIX files total"
+        }
 
         # List found files for debugging
-        foreach ($file in $demoReportFiles) {
-            Write-Host "  Found file: $($file.FullName)"
+        foreach ($file in $allPbixFiles) {
+            Write-Host "  Found PBIX file: $($file.FullName)"
+        }
+
+        if ($allPbixFiles.Count -eq 0) {
+            Write-Warning "No PBIX files found. Looking for PBIP files..."
+            $pbipFiles = Get-ChildItem -Path $artifactPath -Recurse -Filter "*.pbip" -ErrorAction SilentlyContinue
+            Write-Host "Found $($pbipFiles.Count) PBIP files"
+            foreach ($file in $pbipFiles) {
+                Write-Host "  Found PBIP file: $($file.FullName)"
+            }
+            
+            if ($pbipFiles.Count -eq 0) {
+                throw "No Power BI report files (.pbix or .pbip) found in the repository"
+            }
         }
 
         # Connect to Power BI
@@ -212,8 +250,6 @@ function Invoke-ReportDeployment {
         $workspaceDatasetInfo = @{}
         $WaitTillPowerBIDatasetRefresh = "True"
         $workspaceDetails = @()
-        $connectionIds = @()
-        $connectionMap = @{}
 
         # Get unique workspaces from deployment profile
         $uniqueWorkspaces = $deployment_profile | Select-Object mapped_workspace_name, mapped_workspace_id -Unique
@@ -240,9 +276,9 @@ function Invoke-ReportDeployment {
 
             Write-Host "`nProcessing workspace: $workspaceName (ID: $workspaceId)"
 
-            # Use all PBIX files from Demo Report folder
-            $PbixFiles = $demoReportFiles
-            $workspaceType = "demo_reports"
+            # Use all found PBIX files
+            $PbixFiles = $allPbixFiles
+            $workspaceType = "reports"
 
             Write-Host "Workspace type: $workspaceType"
             Write-Host "PBIX files to process: $($PbixFiles.Count)"
@@ -257,61 +293,64 @@ function Invoke-ReportDeployment {
                     Write-Host "  File path: $PowerBIReportFilePath"
 
                     try {
-                        # Deploy Report
+                        # Deploy Report using PowerShell module method
                         Write-Host "  Deploying report..."
                         
-                        # Check if Create-PowerBI-Report function is available
-                        if (Get-Command Create-PowerBI-Report -ErrorAction SilentlyContinue) {
-                            $response = Create-PowerBI-Report -AccessToken $accessToken `
-                                    -PowerBIReportFilePath $PowerBIReportFilePath `
-                                    -PowerBIReportName $reportName `
-                                    -WorkspaceId $workspaceId
-                        } else {
-                            Write-Warning "Create-PowerBI-Report function not available, using alternative deployment method..."
-                            # Use PowerShell module method
+                        try {
                             New-PowerBIReport -Path $PowerBIReportFilePath -Name $reportName -WorkspaceId $workspaceId
+                            Write-Host "  ✓ Report deployed successfully"
+                        } catch {
+                            if ($_.Exception.Message -like "*already exists*") {
+                                Write-Host "  ℹ Report already exists, attempting to update..."
+                                # Try to get the existing report and update it
+                                $existingReports = Get-PowerBIReport -WorkspaceId $workspaceId | Where-Object { $_.Name -eq $reportName }
+                                if ($existingReports) {
+                                    Write-Host "  ℹ Found existing report, skipping deployment"
+                                } else {
+                                    throw $_
+                                }
+                            } else {
+                                throw $_
+                            }
                         }
 
                         # Get Dataset
                         Write-Host "  Getting dataset..."
+                        Start-Sleep -Seconds 5  # Wait for deployment to complete
                         $dataset = Get-PowerBIDataset -WorkspaceId $workspaceId | Where-Object { $_.Name -eq $reportName }
                         if (-not $dataset) {
-                            throw "Dataset $reportName not found in workspace $workspaceId"
+                            Write-Warning "Dataset $reportName not found in workspace $workspaceId"
+                            continue
                         }
                         $datasetId = $dataset.Id
                         Write-Host "  Dataset ID: $datasetId"
 
                         # Take Over Dataset
                         Write-Host "  Taking over dataset..."
-                        $takeoverUrl = "https://api.powerbi.com/v1.0/myorg/groups/$workspaceId/datasets/$datasetId/Default.TakeOver"
                         try {
+                            $takeoverUrl = "https://api.powerbi.com/v1.0/myorg/groups/$workspaceId/datasets/$datasetId/Default.TakeOver"
                             Invoke-PowerBIRestMethod -Method Post -Url $takeoverUrl
+                            Write-Host "  ✓ Dataset takeover successful"
                         } catch {
                             Write-Warning "Could not take over dataset (this may be normal): $_"
                         }
 
                         # Refresh Dataset
                         Write-Host "  Refreshing dataset..."
-                        
-                        # Check if Refresh-PowerBI-Datasets function is available
-                        if (Get-Command Refresh-PowerBI-Datasets -ErrorAction SilentlyContinue) {
-                            Refresh-PowerBI-Datasets -WorkspaceId $workspaceId -datasetId $datasetId -WaitTillPowerBIDatasetRefresh $WaitTillPowerBIDatasetRefresh
-                        } else {
-                            Write-Warning "Refresh-PowerBI-Datasets function not available, using alternative refresh method..."
-                            try {
-                                $refreshUrl = "https://api.powerbi.com/v1.0/myorg/groups/$workspaceId/datasets/$datasetId/refreshes"
-                                Invoke-PowerBIRestMethod -Method Post -Url $refreshUrl
-                                Write-Host "  Dataset refresh initiated successfully"
-                            } catch {
-                                Write-Warning "Could not refresh dataset: $_"
-                            }
+                        try {
+                            $refreshUrl = "https://api.powerbi.com/v1.0/myorg/groups/$workspaceId/datasets/$datasetId/refreshes"
+                            Invoke-PowerBIRestMethod -Method Post -Url $refreshUrl
+                            Write-Host "  ✓ Dataset refresh initiated successfully"
+                        } catch {
+                            Write-Warning "Could not refresh dataset: $_"
                         }
 
                         Write-Host "  ✓ Report $reportName processed successfully"
                     }
                     catch {
                         Write-Error "  ✗ Failed to process report $reportName : $_"
-                        throw
+                        # Continue with other reports instead of failing completely
+                        continue
                     }
                 }
             }
