@@ -79,32 +79,31 @@ stages:
                 Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath
                 Start-Process msiexec.exe -Wait -ArgumentList "/i `"$msiPath`" /quiet /norestart"
 
-          # Step 3: Run PowerShell Orchestrator Script (MainOrchestrator.ps1)
+          # Step 3: Create Output Directory
           - task: PowerShell@2
-            displayName: "Run Orchestrator PowerShell Script"
+            displayName: 'Create Output Directory'
+            inputs:
+              targetType: inline
+              script: |
+                $outputPath = "$(Build.SourcesDirectory)/$(output_folder)"
+                if (!(Test-Path $outputPath)) {
+                    New-Item -Path $outputPath -ItemType Directory -Force
+                }
+                Write-Host "Output directory created: $outputPath"
+
+          # Step 4: Run Main PBIP Deployment Script
+          - task: PowerShell@2
+            displayName: "Deploy PBIP Reports to Power BI"
             inputs:
               filePath: 'Scripts/MainOrchestrator.ps1'
-              arguments: |
-                -DeploymentProfile $(deployment_profile_${{ parameters.Deployment_Environment }})
-                -ConfigFile $(config_file)
-                -OutputFolder $(output_folder)
+              arguments: '-Workspace "${{ parameters.Deployment_Environment }}" -ConfigFile "$(config_file)"'
               pwsh: true
+              workingDirectory: '$(Build.SourcesDirectory)'
 
-          # Step 4: Run Power BI Deployment Script (PBI-Deployment-Utilities.ps1)
-          - task: PowerShell@2
-            displayName: "Run Power BI Deployment Script"
-            inputs:
-              filePath: 'Scripts/PBI-Deployment-Utilities.ps1'
-              arguments: |
-                -WorkspaceName $(deployment_environment)
-                -ConfigFile $(config_file)
-                -DeploymentProfile $(deployment_profile_${{ parameters.Deployment_Environment }})
-                -OutputFolder $(output_folder)
-              pwsh: true
-
-          # Step 5: Publish deployment logs as artifacts
+          # Step 5: Publish deployment logs as artifacts (if they exist)
           - task: PublishBuildArtifacts@1
             displayName: 'Publish Deployment Logs'
+            condition: always()
             inputs:
               PathtoPublish: '$(Build.SourcesDirectory)/$(output_folder)'
               ArtifactName: 'PowerBI-Deployment-Logs'

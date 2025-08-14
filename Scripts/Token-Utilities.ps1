@@ -1,3 +1,6 @@
+# Token-Utilities.ps1
+# This script contains utility functions for token management
+
 function Get-SPNToken {
     <#
     .SYNOPSIS
@@ -15,18 +18,18 @@ function Get-SPNToken {
     .OUTPUTS
     Returns OAuth2 access token as string.
     #>
-
+    
     param (
         [Parameter(Mandatory=$true)]
         [string]$TenantId,
-
+        
         [Parameter(Mandatory=$true)]
         [string]$ClientId,
-
+        
         [Parameter(Mandatory=$true)]
         [string]$ClientSecret
     )
-
+    
     try {
         Write-Host "Acquiring access token for Fabric API..."
         
@@ -37,10 +40,10 @@ function Get-SPNToken {
             client_secret = $ClientSecret
             scope         = "https://api.fabric.microsoft.com/.default"
         }
-
+        
         $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -Method Post -Body $body
         $accessToken = $tokenResponse.access_token
-
+        
         Write-Host "✓ Successfully acquired Fabric API access token"
         return $accessToken
     }
@@ -50,14 +53,14 @@ function Get-SPNToken {
         # Fallback to Power BI API scope
         try {
             Write-Host "Trying Power BI API scope as fallback..."
-
+            
             $body = @{
                 grant_type    = "client_credentials"
                 client_id     = $ClientId
                 client_secret = $ClientSecret
                 resource      = "https://analysis.windows.net/powerbi/api"
             }
-
+            
             $tokenResponse = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$TenantId/oauth2/token" -Method Post -Body $body
             $accessToken = $tokenResponse.access_token
             
@@ -71,8 +74,15 @@ function Get-SPNToken {
     }
 }
 
-# Example Usage:
-# $tenantId = "your-tenant-id"
-# $clientId = "your-client-id"
-# $clientSecret = "your-client-secret"
-# $accessToken = Get-SPNToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
+function Get-AccessTokenFromConfig {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$TenantId,
+        [Parameter(Mandatory=$true)]
+        [string]$ClientId,
+        [Parameter(Mandatory=$true)]
+        [string]$ClientSecret
+    )
+    
+    return Get-SPNToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
+}
