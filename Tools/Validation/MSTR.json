@@ -1,0 +1,18 @@
+{
+  "MSTR": {
+    "Report1": {
+      "Page1": {
+        "Visual1": "file1.xlsx",
+        "Visual2": "file9.xlsx"
+      },
+      "Page2": {
+        "Visual1": "file9.xlsx"
+      }
+    },
+    "Report2": {
+      "Page1": {
+        "Visual1": "file11.xlsx"
+      }
+    }
+  }
+}
