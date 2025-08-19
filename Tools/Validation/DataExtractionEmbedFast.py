@@ -5,29 +5,28 @@ import logging
 import re
 import json
 from typing import Dict, List, Set, Tuple, Optional
-from playwright.async_api import async_playwright, Page, Browser, BrowserContext, Download
+from pathlib import Path
+from playwright.async_api import async_playwright, Page, Browser, BrowserContext, Download, Frame, TimeoutError as PWTimeout          
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def _resolve_edge_user_data_and_profile():
+def _resolve_edge_profile_dir():
     """
-    Returns (edge_user_data_dir, edge_profile_dir_name)
-    edge_profile_dir_name is typically 'Default', 'Profile 1', 'Profile 2', ...
-    You can override via env EDGE_PROFILE_DIR.
+    Returns the path for Edge profile directory
     """
-    # Detect base Edge user-data dir by OS
-    if sys.platform.startswith("win"):
-        base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "User Data")
-    elif sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Application Support/Microsoft Edge")
-    else:
-        # Linux
-        base = os.path.expanduser("~/.config/microsoft-edge")
+    PROFILE_DIR = ".edge-user-data"  # persistent profile (reuses your SSO)
+    profile_path = str(Path(PROFILE_DIR).resolve())
+    Path(profile_path).mkdir(parents=True, exist_ok=True)
+    return profile_path
 
-    profile = os.environ.get("EDGE_PROFILE_DIR", "Default")  # e.g., "Default", "Profile 1"
-    return base, profile
-
+def likely_auth_url(u: str) -> bool:
+    """Check if URL is likely an authentication endpoint"""
+    u = (u or "").lower()
+    return any(s in u for s in [
+        "login.microsoftonline.com", "login.microsoft.com",
+        "sts.", "adfs.", "sso.", "auth."
+    ])
 
 # -------------------- UTIL -------------------- #
 def _sanitize_filename(s: str) -> str:
@@ -75,42 +74,30 @@ class ReportsRunner:
 
     async def run(self):
         async with async_playwright() as p:
-            edge_user_data_dir, edge_profile = _resolve_edge_user_data_and_profile()
-
-            # Safety: ensure Edge user-data exists
-            if not os.path.isdir(edge_user_data_dir):
-                raise RuntimeError(
-                    f"Edge user-data directory not found: {edge_user_data_dir}\n"
-                    "Open Microsoft Edge once to initialize the profile, or set EDGE_PROFILE_DIR/. "
-                )
+            profile_path = _resolve_edge_profile_dir()
+            logger.info(f"Using persistent profile at: {profile_path}")
 
             try:
-                # IMPORTANT: This uses your real Edge profile.
-                # Close all Edge windows that use this profile before running, or you'll get a 'profile is in use' error.
+                # Launch Edge with persistent profile but allowing new tabs
                 context = await p.chromium.launch_persistent_context(
-                    user_data_dir=edge_user_data_dir,
-                    channel="msedge",            # force Microsoft Edge
+                    user_data_dir=profile_path,
+                    channel="msedge",
                     headless=False,
                     viewport={"width": 1920, "height": 1080},
                     accept_downloads=True,
                     ignore_https_errors=True,
                     args=[
-                        f"--profile-directory={edge_profile}",  # use your existing profile (cookies, extensions, SSO)
-                        "--disable-dev-shm-usage",
                         "--no-first-run",
                         "--no-default-browser-check",
                     ],
                 )
-                logger.info(f"Launched Edge with profile '{edge_profile}' at '{edge_user_data_dir}'")
+                logger.info(f"Launched Edge with profile at '{profile_path}'")
             except Exception as e:
-                # Most common: profile is already in use. Close Edge (all windows) and try again.
                 raise RuntimeError(
-                    "Could not launch Microsoft Edge with your existing profile.\n"
-                    "Tip: Close all Edge windows that use this profile and rerun.\n"
+                    "Could not launch Microsoft Edge with persistent profile.\n"
                     f"Underlying error: {e}"
                 )
 
-            # In a persistent context, 'context' is already the BrowserContext
             page = context.pages[0] if context.pages else await context.new_page()
 
             for idx, report in enumerate(self.reports):
@@ -125,16 +112,64 @@ class ReportsRunner:
                 logger.info(f"=== [{idx+1}/{len(self.reports)}] Opening report: {name} ===")
                 await page.goto(url, wait_until="domcontentloaded")
 
-                # With your real profile, you should already be signed in.
-                # Keep this guard just in case first run still needs a one-time login.
-                if idx == 0:
-                    try:
-                        await page.wait_for_selector("[data-testid='artifact-info-title'], #pvExplorationHost", timeout=30000)
-                    except:
-                        print("\nIf you see a login or MFA prompt, complete it in the Edge window.")
-                        input("Press Enter after the report is fully loaded (you should see report visuals)... ")
+                # Handle SSO if needed
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=20000)
+                except PWTimeout:
+                    pass
 
-                # Build plan (same as before)
+                if likely_auth_url(page.url):
+                    logger.info("Sign-in detected. Waiting for auth completion...")
+                    try:
+                        not_auth_pattern = re.compile(
+                            r"^(?!.*(login\.microsoftonline\.com|login\.microsoft\.com|sts\.|adfs\.|sso\.|auth\.)).*",
+                            re.I
+                        )
+                        await page.wait_for_url(not_auth_pattern, timeout=240000)
+                        logger.info("Authentication completed.")
+                    except PWTimeout:
+                        logger.warning("Authentication timeout. Please complete login manually.")
+                        continue
+
+                # Wait for report to load and handle iframes
+                try:
+                    await page.wait_for_selector(
+                        "iframe, #pvExplorationHost, [data-testid='artifact-info-title']",
+                        timeout=30000
+                    )
+                    
+                    # Build plan for pages and visuals
+                    pages_order = [p.get("name", f"page_{i+1}") for i, p in enumerate(pages)]
+                    page_visuals = {
+                        _norm(p.get("name", f"page_{i+1}")): {_norm(v) for v in p.get("visuals", [])}
+                        for i, p in enumerate(pages)
+                    }
+
+                    # Check if report is in iframe and switch to it if needed
+                    iframe = await page.query_selector("iframe")
+                    if iframe:
+                        logger.info("Report detected in iframe, switching context...")
+                        frame = await iframe.content_frame()
+                        if frame:
+                            # Store both page and frame - we need both
+                            worker = SingleReportWorker(
+                                page=page,
+                                frame=frame,  # Pass the frame separately
+                                config_report_name=name,
+                                pages_order=pages_order,
+                                page_visuals=page_visuals
+                            )
+                            await worker.run_for_current_report(url)
+                            continue  # Skip the normal flow since we handled it in iframe
+                        else:
+                            logger.warning("Failed to switch to iframe context")
+                            continue
+                    
+                except PWTimeout:
+                    logger.warning("Report surface not detected. Please check if report loaded correctly.")
+                    continue
+
+                # Build plan for pages and visuals
                 pages_order = [p.get("name", f"page_{i+1}") for i, p in enumerate(pages)]
                 page_visuals = {
                     _norm(p.get("name", f"page_{i+1}")): {_norm(v) for v in p.get("visuals", [])}
@@ -154,8 +189,11 @@ class ReportsRunner:
 
 # -------------------- SINGLE REPORT WORKER -------------------- #
 class SingleReportWorker:
-    def __init__(self, page: Page, config_report_name: str, pages_order: List[str], page_visuals: Dict[str, Set[str]]):
+    def __init__(self, page: Page, config_report_name: str, pages_order: List[str], 
+                 page_visuals: Dict[str, Set[str]], frame: Frame = None):
         self.page = page
+        self.frame = frame  # Store the frame if we're working with an iframe
+        self.context = frame if frame else page  # Use frame for element operations if available
         self.config_report_name = config_report_name
         self.pages_order = pages_order or []
         self.page_visuals = page_visuals or {}
@@ -166,8 +204,8 @@ class SingleReportWorker:
         await self._setup_report_folder()  # uses config name
         # Try to get pages nav
         try:
-            await self.page.wait_for_selector('[data-testid="pages-navigation-list"]', timeout=30000)
-            pages_pane = await self.page.query_selector('[data-testid="pages-navigation-list"]')
+            await self.context.wait_for_selector('[data-testid="pages-navigation-list"]', timeout=30000)
+            pages_pane = await self.context.query_selector('[data-testid="pages-navigation-list"]')
             page_items = await pages_pane.query_selector_all('[data-testid="pages-navigation-list-items"]')
         except Exception as e:
             logger.warning(f"Could not find pages navigation list: {e}. Will operate on current page.")
@@ -198,7 +236,7 @@ class SingleReportWorker:
                 logger.info(f"[{self.config_report_name}] Switching to page: {cfg_page_name}")
                 try:
                     await match_el.click()
-                    await self.page.wait_for_timeout(1500)
+                    await self.context.wait_for_timeout(1500)
                 except Exception as e:
                     logger.warning(f"Failed to click page '{cfg_page_name}': {e}")
                     continue
@@ -228,7 +266,7 @@ class SingleReportWorker:
         os.makedirs(screenshot_dir, exist_ok=True)
         screenshot_path = os.path.join(screenshot_dir, f"{safe_page_name}.png")
         try:
-            # OVERWRITE behavior: direct save (Playwright overwrites if file exists)
+            # Always use self.page for screenshots, even when working with frames
             await self.page.screenshot(path=screenshot_path, full_page=True)
             logger.info(f"Screenshot saved: {screenshot_path}")
         except Exception as e:
@@ -280,40 +318,90 @@ class SingleReportWorker:
             try:
                 await container.scroll_into_view_if_needed()
                 await container.hover()
-                await self.page.wait_for_timeout(200)
+                await self.context.wait_for_timeout(200)
 
-                more_btn = await container.query_selector(
-                    "button[aria-label*='More options'], "
-                    "button[data-testid='visual-more-options-btn'], "
-                    ".vcMenuBtn"
-                )
+                # Try different button selectors
+                button_selectors = [
+                    "button[aria-label*='More options']",
+                    "button[data-testid='visual-more-options-btn']",
+                    ".vcMenuBtn",
+                    "[aria-label*='More options']",
+                    "[title*='More options']",
+                    "[class*='menu-btn']",
+                    "[class*='more-options']"
+                ]
+
+                more_btn = None
+                for selector in button_selectors:
+                    more_btn = await container.query_selector(selector)
+                    if more_btn and await more_btn.is_visible():
+                        break
+
                 if not more_btn:
-                    await self.page.wait_for_timeout(300)
-                    more_btn = await container.query_selector(
-                        "button[aria-label*='More options'], "
-                        "button[data-testid='visual-more-options-btn'], "
-                        ".vcMenuBtn"
-                    )
-                if not more_btn:
-                    await self.page.mouse.wheel(0, 200)
-                    await self.page.wait_for_timeout(150)
+                    await self.context.wait_for_timeout(300)
+                    # Try moving viewport slightly
+                    try:
+                        await self.page.mouse.wheel(0, 100)
+                    except:
+                        # If mouse wheel fails, try scrolling the container
+                        await container.evaluate("el => el.scrollIntoView({behavior: 'smooth', block: 'center'})")
+                    await self.context.wait_for_timeout(200)
                     continue
 
+                # Try different click methods
                 try:
-                    await self.page.evaluate("(b) => b.click()", more_btn)
-                except:
                     await more_btn.click()
+                except:
+                    try:
+                        await self.context.evaluate("(b) => b.click()", more_btn)
+                    except:
+                        try:
+                            # Force click using JavaScript
+                            await self.context.evaluate("""(element) => {
+                                const clickEvent = new MouseEvent('click', {
+                                    bubbles: true,
+                                    cancelable: true,
+                                    view: window
+                                });
+                                element.dispatchEvent(clickEvent);
+                            }""", more_btn)
+                        except:
+                            continue
 
-                await self.page.wait_for_selector("[role='menu'], .pbi-menu", timeout=3000)
-                menus = await self.page.query_selector_all("[role='menu'], .pbi-menu")
-                for m in menus[::-1]:
-                    if await m.is_visible():
-                        return m
-            except:
+                # Check for menu using multiple selectors
+                menu_selectors = [
+                    "[role='menu']", 
+                    ".pbi-menu",
+                    "[class*='menu-container']",
+                    "[class*='context-menu']"
+                ]
+
+                menu = None
+                for selector in menu_selectors:
+                    try:
+                        await self.context.wait_for_selector(selector, timeout=3000)
+                        menus = await self.context.query_selector_all(selector)
+                        for m in menus[::-1]:
+                            if await m.is_visible():
+                                menu = m
+                                break
+                        if menu:
+                            break
+                    except:
+                        continue
+
+                if menu:
+                    return menu
+
+            except Exception as e:
+                logger.debug(f"Menu interaction attempt failed: {e}")
                 pass
 
-            await self.page.mouse.wheel(0, 200)
-            await self.page.wait_for_timeout(200)
+            try:
+                await self.page.mouse.wheel(0, 200)
+            except:
+                pass
+            await self.context.wait_for_timeout(200)
 
         return None
 
@@ -323,16 +411,34 @@ class SingleReportWorker:
             logger.info("No allowed visuals configured for this page; skipping.")
             return
 
-        await self.page.wait_for_selector(".visualContainer[role='group']", timeout=60000)
+        # Try different selectors for visual containers
+        selectors = [
+            ".visualContainer[role='group']",  # Standard Power BI
+            ".visual-container",               # EmbedFast common
+            "[class*='visual'][role='group']", # Generic visual container
+            "[class*='visual-container']",     # Another common pattern
+        ]
 
-        all_containers = await self.page.query_selector_all(".visualContainer[role='group']")
         containers = []
-        for c in all_containers:
+        for selector in selectors:
             try:
-                if await c.is_visible():
-                    containers.append(c)
-            except:
-                pass
+                await self.context.wait_for_selector(selector, timeout=5000)
+                all_containers = await self.context.query_selector_all(selector)
+                
+                # Check visibility
+                for c in all_containers:
+                    try:
+                        if await c.is_visible():
+                            containers.append(c)
+                    except:
+                        continue
+                
+                if containers:
+                    logger.info(f"Found visuals using selector: {selector}")
+                    break
+            except Exception as e:
+                logger.debug(f"Selector '{selector}' failed: {e}")
+                continue
 
         logger.info(f"Visual containers found: {len(all_containers)} | Visible containers: {len(containers)}")
         if not containers:
@@ -388,8 +494,8 @@ class SingleReportWorker:
                     continue
 
                 try:
-                    await self.page.wait_for_selector(".pbi-modern-button", timeout=6000)
-                    buttons = await self.page.query_selector_all(".pbi-modern-button")
+                    await self.context.wait_for_selector(".pbi-modern-button", timeout=6000)
+                    buttons = await self.context.query_selector_all(".pbi-modern-button")
                     did_export = False
                     for b in buttons:
                         bt = (await b.inner_text() or "").lower()
@@ -428,3 +534,7 @@ class SingleReportWorker:
 if __name__ == "__main__":
     runner = ReportsRunner()
     asyncio.run(runner.run())
+
+
+# give exact loaction in code where I need to update it
+# Keep the other code parts as it is
