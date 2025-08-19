@@ -1,0 +1,18 @@
+{
+"PowerBI": {
+    "Report1": {
+      "Page1": {
+        "Visual1": "file2.xlsx",
+        "Visual2": "file10.xlsx"
+      },
+      "Page2": {
+        "Visual1": "file10.xlsx"
+      }
+    },
+    "Report2": {
+      "Page1": {
+        "Visual1": "file12.xlsx"
+      }
+    }
+  }
+}
