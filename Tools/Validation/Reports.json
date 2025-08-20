@@ -1,0 +1,28 @@
+{
+  "PowerBI_reports": [
+    {
+      "name": "Inventory Sample Report",
+      "url": "https://embedfastdev-app.azurewebsites.net/groups/40b2fd1e-c113-4d33-a139-3e46c8bc8e13/reports/68ac0481-49a4-4d15-a18c-98949b129fc7",
+      "pages": [
+        {
+          "name": "Inventory and Transactions Analysis",
+          "visuals": [
+            "Quantity in Stock by Category",
+            "Transactions Over Time",
+            "Stock Distribution by Location"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "DEX Live Connected Inventory Management",
+      "url": "https://embedfastdev-app.azurewebsites.net/groups/40b2fd1e-c113-4d33-a139-3e46c8bc8e13/reports/1198cd3f-7f71-4371-8222-8dca3dea84a7",
+      "pages": [
+        {
+          "name": "Inventory Overview",
+          "visuals": ["ALL"]
+        }
+      ]
+    }
+  ]
+}
