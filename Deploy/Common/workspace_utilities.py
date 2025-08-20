@@ -1,506 +1,392 @@
-import requests
+import os 
 import json
+import requests
 import time 
-import os
 from datetime import datetime, timezone
+from workspace_utilities import *
+from token_utilities import *
+from workspace_item_utilities import *
+import pandas as pd
 
-def does_workspace_exists_by_name(workspace_name, token):
+spn = os.getenv("spn")
+deployment_env = os.getenv("deployment_env")
+environment_type = os.getenv("environment_type")
+artifact_path = os.getenv("artifact_path")
+build_number = os.getenv("build_number")
+connections_json = os.getenv("connections") 
+
+# Parse the JSON string
+connections_data = json.loads(connections_json)
+
+trimmed_lower_deployment_env = deployment_env.lower().strip()
+trimmed_lower_environment_type = environment_type.lower().strip()
+
+# Define paths to the configurations in ADO
+config_base_path = f"Configuration/{deployment_env}"
+deployment_profile_path = f"{config_base_path}/DEPLOYMENT_PROFILE.csv"
+configuration_files_list = ["DEPLOYMENT_PROFILE.csv", "IN_TAKE_CONFIG.csv"]
+
+def get_workspace_by_name_with_retry(workspace_name, spn_access_token, max_retries=3):
     """
-    Checks if a Power BI workspace with the given name exists in the user's organization.
-
+    Attempts to retrieve workspace details by name with retry logic.
+    
     Parameters:
-    - workspace_name (str): The name of the Power BI workspace to search for.
-    - token (str): The access token used for authentication to the Fabric API.
+    - workspace_name (str): Name of the workspace to find
+    - spn_access_token (str): Access token for API calls
+    - max_retries (int): Maximum number of retry attempts
+    
     Returns:
-    - dict: The information about the workspace if it exists, as returned by the Fabric API.
-    - None: Returns None if the workspace does not exist or if the API request fails.
+    dict or None: Workspace details if found, None otherwise
     """
+    for attempt in range(max_retries):
+        try:
+            print(f"Attempting to find workspace '{workspace_name}' (attempt {attempt + 1}/{max_retries})")
+            workspace_details = does_workspace_exists_by_name(workspace_name, spn_access_token)
+            
+            if workspace_details:
+                print(f"✓ Found existing workspace: {workspace_details}")
+                return workspace_details
+            else:
+                print(f"✗ Workspace '{workspace_name}' not found in attempt {attempt + 1}")
+                
+        except Exception as e:
+            print(f"✗ Error checking workspace existence (attempt {attempt + 1}): {str(e)}")
+            
+        if attempt < max_retries - 1:
+            time.sleep(2)  # Wait 2 seconds before retry
+            
+    return None
 
-    try:
-        url = f"https://api.powerbi.com/v1.0/myorg/groups?$filter=name eq '{workspace_name}'"
-        response = None
-        
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-        
-        response = requests.get(url, headers=headers)
-
-        if response.status_code != 200:
-            json_response_str = None
-            try:
-                json_response_str = str(response.json())
-            except Exception as e:
-                json_response_str = str(response)
-            raise Exception(f"Checking workspace failed: " + json_response_str)
-
-        if len(response.json()["value"]) > 0:
-            return response.json()["value"][0]  # Return workspace info if it exists
-        
-        return None
-        
-    except Exception as e:
-        raise e
-
-def delete_workspace(workspace_id, access_token):
+def create_workspace_direct_api(workspace_name, capacity_id, spn_access_token):
     """
-    Deletes a workspace in Microsoft Fabric using the API.
-
+    Direct API call to create workspace, bypassing the problematic create_workspace function.
+    
     Parameters:
-    - workspace_id (str): The ID of the workspace to delete.
-    - access_token (str): The authentication token for API access.
-
+    - workspace_name (str): Name of the workspace to create
+    - capacity_id (str): Capacity ID for the workspace (None for trial)
+    - spn_access_token (str): Access token for API calls
+    
     Returns:
-    - bool: True if the workspace was successfully deleted, False otherwise.
+    str: Workspace ID of the created workspace
     """
-    url = f"https://api.fabric.microsoft.com/v1/workspaces/{workspace_id}"
+    url = "https://api.fabric.microsoft.com/v1/workspaces"
     headers = {
-        "Authorization": f"Bearer {access_token}",
+        "Authorization": f"Bearer {spn_access_token}",
         "Content-Type": "application/json"
     }
     
-    try:
-        response = requests.delete(url, headers=headers)
-        response.raise_for_status()  # Raise an error for non-2xx responses
-        return True
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Error deleting workspace {workspace_id}: {e}")
+    # Prepare the payload
+    payload = {
+        "displayName": workspace_name
+    }
+    
+    # Add capacity ID if provided (not for trial workspaces)
+    if capacity_id:
+        payload["capacityId"] = capacity_id
+    
+    print(f"Creating workspace via direct API call: {workspace_name}")
+    print(f"Request URL: {url}")
+    print(f"Request Payload: {json.dumps(payload, indent=1)}")
+    
+    response = requests.post(url, headers=headers, json=payload)
+    print(f"Response Status Code: {response.status_code}")
+    
+    if response.status_code == 201:
+        # Workspace created successfully
+        response_data = response.json()
+        workspace_id = response_data.get("id")
+        print(f"✓ Successfully created workspace with ID: {workspace_id}")
+        return workspace_id
+    elif response.status_code == 409:
+        # Workspace already exists - this is the error we're handling
+        print(f"Workspace '{workspace_name}' already exists (409 conflict)")
+        return None  # Signal that workspace exists but we need to find it
+    else:
+        # Other error
+        try:
+            error_details = response.json()
+            error_message = error_details.get("message", "Unknown error")
+        except:
+            error_message = response.text or f"HTTP {response.status_code}"
+        
+        raise Exception(f"Failed to create workspace: {error_message}")
 
-def create_workspace(workspace_name, capacity_id, token):
+def create_workspace_with_fallback(workspace_name, capacity_id, spn_access_token):
     """
-    Creates a new workspace in Microsoft Fabric using the provided workspace name and capacity ID.
-    Supports both trial version (no capacity ID) and premium capacity scenarios.
-
+    Attempts to create a workspace with proper error handling for existing workspaces.
+    
     Parameters:
-    - workspace_name (str): The name to assign to the new workspace.
-    - capacity_id (str): The capacity ID under which the workspace should be created. 
-                         Can be None, NaN, or empty for trial versions.
-    - token (str): The access token for authentication to the Fabric API.
-
+    - workspace_name (str): Name of the workspace to create
+    - capacity_id (str): Capacity ID for the workspace (None for trial)
+    - spn_access_token (str): Access token for API calls
+    
     Returns:
-    - str: The ID of the created workspace if successful.
-    - None: Returns None if the workspace creation fails (i.e., the API does not return a 201 status code).
+    str: Workspace ID of the created or existing workspace
     """
-
     try:
-        start_time = datetime.now(timezone.utc)
-        url = "https://api.fabric.microsoft.com/v1/workspaces"
-
-        # ---- Normalize capacity_id safely ----
-        if capacity_id is None:
-            capacity_id_str = ""
-        else:
-            capacity_id_str = str(capacity_id).strip()
-
-        # Detect trial mode (no valid capacity id)
-        is_trial = (
-            os.getenv('FABRIC_TRIAL_VERSION', 'false').lower() == 'true'
-            or capacity_id_str == ""
-            or capacity_id_str.lower() in ["nan", "none"]
-            or capacity_id_str == "capacity_id_1234567890"
-            or capacity_id_str == "00000000-0000-0000-0000-000000000000"
-        )
-
-        # ---- Payload ----
-        if is_trial:
-            print(f"Creating trial workspace: {workspace_name} (no capacity ID)")
-            payload = {
-                "displayName": workspace_name
-            }
-        else:
-            print(f"Creating premium workspace: {workspace_name} with capacity: {capacity_id_str}")
-            payload = {
-                "displayName": workspace_name,
-                "capacityId": capacity_id_str
-            }
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
+        print(f"Attempting to create workspace: '{workspace_name}'")
         
-        print(f"Request URL: {url}")
-        print(f"Request Payload: {json.dumps(payload, indent=2)}")
+        # Use direct API call instead of the problematic create_workspace function
+        workspace_id = create_workspace_direct_api(workspace_name, capacity_id, spn_access_token)
         
-        # ---- API Call ----
-        response = requests.post(url, headers=headers, json=payload)
-        
-        print(f"Response Status Code: {response.status_code}")
-        print(f"Response Content: {response.text}")
-
-        if response.status_code == 201:
-            workspace_data = response.json()
-            workspace_id = workspace_data["id"]
-            workspace_name = workspace_data["displayName"]
-            print(f"✓ Workspace created successfully: {workspace_name}")
-            print(f"  Workspace ID: {workspace_id}")
+        if workspace_id:
+            # Workspace was successfully created
+            print(f"✓ Successfully created new workspace with ID: {workspace_id}")
             return workspace_id
+        else:
+            # workspace_id is None, meaning workspace already exists (409 error)
+            print(f"Workspace '{workspace_name}' already exists. Attempting to retrieve existing workspace...")
             
-        elif response.status_code == 409:
-            print(f"Workspace '{workspace_name}' already exists, attempting to retrieve existing workspace...")
-            existing_workspace = does_workspace_exists_by_name(workspace_name, token)
-            if existing_workspace:
-                workspace_id = existing_workspace["id"]
-                print(f"✓ Using existing workspace: {workspace_name}")
-                print(f"  Workspace ID: {workspace_id}")
+            # Try to get the existing workspace with retry logic
+            workspace_details = get_workspace_by_name_with_retry(workspace_name, spn_access_token)
+            
+            if workspace_details and "id" in workspace_details:
+                workspace_id = workspace_details["id"]
+                print(f"✓ Successfully retrieved existing workspace ID: {workspace_id}")
                 return workspace_id
             else:
-                raise Exception("Workspace exists but could not retrieve details")
-        else:
-            try:
-                error_message = str(response.json())
-            except Exception:
-                error_message = response.text
-            
-            print(f"✗ Failed to create workspace: {error_message}")
-            raise Exception(f"Unable to create workspace: {error_message}")
-        
-    except Exception as e:
-        error_message = str(e)
-        print(f"✗ Error creating workspace: {error_message}")
-        raise Exception(f"Error creating workspace: {error_message}")
-        
-def parse_user_info(user_info_str):
-    """
-    Parses and cleans the user info string into a list of dictionaries.
-    
-    Parameters:
-    - user_info_str (str): The string of user details in JSON format, separated by "|".
-    
-    Returns:
-    list: A list of user information dictionaries.
-    """
-    
-    user_info_list = []  # Initialize an empty list to store user information dictionaries
-    try:
-        split_user_info_list = user_info_str.split("|")
-        seen_configuration = set()
-
-        # Split the input string by "|" and iterate over each user info segment
-        for user_info in split_user_info_list:
-            # Remove leading/trailing spaces and replace single quotes with double quotes for JSON parsing
-            user_info = user_info.strip().replace("'", "\"")
-            
-            try:
-                # Parse the cleaned string into a dictionary
-                user_info_dict = json.loads(user_info)
+                # Last resort: try to list all workspaces and find by name
+                print("Attempting to find workspace by listing all workspaces...")
+                try:
+                    all_workspaces = list_all_workspaces(spn_access_token)
+                    for ws in all_workspaces:
+                        if ws.get("displayName") == workspace_name or ws.get("name") == workspace_name:
+                            workspace_id = ws["id"]
+                            print(f"✓ Found workspace via workspace listing: {workspace_id}")
+                            return workspace_id
+                except Exception as list_error:
+                    print(f"✗ Failed to list workspaces: {str(list_error)}")
                 
-                # Trim whitespace from each key and value in the dictionary
-                user_info_dict = {key.strip(): value.strip() for key, value in user_info_dict.items()}
+                raise Exception(f"Workspace '{workspace_name}' exists but could not retrieve details. Please check permissions or try again later.")
                 
-                # Extract required fields safely
-                identifier = user_info_dict.get("identifier", "").strip().lower()
-                principal_type = user_info_dict.get("principalType", "").strip().lower()
-                access = user_info_dict.get("access", "").strip().lower()
-
-                if not identifier or not principal_type or not access:
-                    raise Exception(f"Missing required fields in user info: {user_info_dict}")
-
-                user_tuple = (identifier, principal_type, access)
-
-                if user_tuple not in seen_configuration:
-                    seen_configuration.add(user_tuple)
-                    # Append the cleaned dictionary to the list
-                    user_info_list.append(user_info_dict)
-            
-            except Exception as e:
-                # Raise an exception if parsing fails for a particular user info segment
-                raise Exception(f"Error parsing user info: {user_info}: {str(e)}")
+    except Exception as e:
+        error_str = str(e).lower()
+        print(f"✗ Workspace creation failed: {str(e)}")
         
-        return user_info_list
-
-    except Exception as e:
-        raise Exception(f"An error occurred in functions parse_user_info: {str(e)}")
-
-def validate_no_duplicates(user_info_list):
-    """
-    Validates that no user appears twice with different roles.
-
-    Parameters:
-    - user_info_list (list): A list of user information dictionaries.
-
-    Raises:
-    - Exception: If a user is found more than once with different roles.
-
-    Returns:
-    - bool: True if validation is successful and no duplicates are found.
-    """
-    
-    seen_identifiers = {}  # Dictionary to track users and their assigned roles
-
-    try:
-        for user_info in user_info_list:
-            identifier = user_info.get("identifier", "").strip().lower()
-            role = user_info.get("access", "").strip().lower()
-
-            if not identifier or not role:
-                raise ValueError("Both 'identifier' and 'access' fields must be non-empty.")
-
-            if identifier in seen_identifiers and seen_identifiers[identifier] != role:
-                raise Exception(
-                    f"User '{identifier}' has been specified more than once with different roles: "
-                    f"'{seen_identifiers[identifier]}' and '{role}'."
-                )
-
-            seen_identifiers[identifier] = role  # Store identifier-role pair
-
-        return True  # Return True if validation passes
-    except Exception as e:
-        raise Exception(f"An error ocurred while validating the configuration for the users: {str(e)}")
-
-def list_current_workspace_users(workspace_id, token):
-    """
-    Lists the current users in the specified Power BI workspace.
-    
-    Parameters:
-    - workspace_id (str): The workspace ID.
-    - token (str): The authorization token.
-    
-    Returns:
-    list: A list of user identifiers currently added to the workspace.
-    
-    Raises:
-    Exception: If the API request to fetch users fails.
-    """
-
-    try:
-        # Power BI API endpoint for listing workspace users
-        api_url = f"https://api.powerbi.com/v1.0/myorg/groups/{workspace_id}/users"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-
-        response = requests.get(api_url, headers=headers)
-
-        # Raise an error if the API request fails
-        if response.status_code != 200:
-            raise Exception(
-                f"Failed to fetch current users of workspace {workspace_id}: {response.status_code} {response.text}"
-            )
-
-        # Extract user identifiers and convert them to lowercase for consistency
-        current_users = {user["identifier"].lower(): user["groupUserAccessRight"].lower() for user in response.json().get("value", [])}
-
-        return current_users  # Return the list of user identifiers
-
-    except Exception as e:
-        raise Exception(f"And error occurred while getting current workspace users: {str(e)}")
-
-def prepare_users_to_add(user_info_list, current_users):
-    """
-    Prepares a list of users to add to the workspace.
-    
-    Parameters:
-    - user_info_list (list): A list of user information dictionaries.
-    - current_users (dict): A list of user identifiers already in the workspace.
-    
-    Returns:
-    list: A list of user dictionaries to add to the workspace.
-    """
-    try:
-        users_to_add = []  # Initialize an empty list to collect users who need to be added
-        current_user_names = current_users.keys()
-        users_to_update_access = []
-
-        # Iterate through each user's information in the provided list
-        for user_info in user_info_list:
-            # Retrieve and normalize the user's identifier for comparison
-            identifier = user_info.get("identifier", "").strip().lower()
-            access = user_info.get("access", "").strip().lower()
-
-            # Check if the user is not already in the list of current users
-            if identifier not in current_user_names:
-                users_to_add.append(user_info)  # Add the user info to the list for adding
-
+        # Check if the error is due to workspace already existing
+        if ("workspace name already exists" in error_str or 
+            "workspacenamealreadyexists" in error_str or 
+            "409" in error_str or
+            "conflict" in error_str):
+            
+            print(f"Detected workspace conflict. Attempting to retrieve existing workspace...")
+            
+            # Try to get the existing workspace with retry logic
+            workspace_details = get_workspace_by_name_with_retry(workspace_name, spn_access_token)
+            
+            if workspace_details and "id" in workspace_details:
+                workspace_id = workspace_details["id"]
+                print(f"✓ Successfully retrieved existing workspace ID: {workspace_id}")
+                return workspace_id
             else:
-                if current_users[identifier].lower() != access:
-                    users_to_update_access.append(user_info)
+                # Last resort: try to list all workspaces and find by name
+                print("Attempting to find workspace by listing all workspaces...")
+                try:
+                    all_workspaces = list_all_workspaces(spn_access_token)
+                    for ws in all_workspaces:
+                        if ws.get("displayName") == workspace_name or ws.get("name") == workspace_name:
+                            workspace_id = ws["id"]
+                            print(f"✓ Found workspace via workspace listing: {workspace_id}")
+                            return workspace_id
+                except Exception as list_error:
+                    print(f"✗ Failed to list workspaces: {str(list_error)}")
+                
+                raise Exception(f"Workspace '{workspace_name}' exists but could not retrieve details. Please check permissions or try again later.")
+        else:
+            # Re-raise the original exception if it's not about existing workspace
+            raise e
 
-                current_users[identifier] = None
-
-        return users_to_add, users_to_update_access, current_users  # Return the list of users to be added       
-    except Exception as e:
-        raise Exception(f"An error occurred in function prepare users to add: {str(e)}")
-
-def send_request_user_to_workspace(workspace_id, token, user):
+def orchestrator(tenant_id, client_id, client_secret, connections_data):
     """
-    Adds a user to the Power BI workspace.
-    
+    Orchestrates the deployment of networks with improved workspace handling.
+
     Parameters:
-    - workspace_id (str): The workspace ID.
-    - token (str): The authorization token or client instance.
-    - user (dict): A dictionary containing user details to add to the workspace.
-    
-    Returns:
-    response: The response object from the API request.
-    
+    - tenant_id (str): The Azure Active Directory tenant ID used for authentication.
+    - client_id (str): The client ID (application ID) used for authentication with Azure.
+    - client_secret (str): The client secret associated with the Azure application.
+    - connections_data (dict): A dictionary of all connection names and types.
+
     Raises:
-    Exception: If the API call fails or an error occurs.
+    Exception: If any error occurs during onboarding of networks.
     """
+
+    error_message = ""
+
     try:
-        # Power BI API endpoint to add users to the workspace
-        api_url = f"https://api.powerbi.com/v1.0/myorg/groups/{workspace_id}/users"
+        # Read deployment and capacity configuration files
+        all_deployment_profile_df = pd.read_csv(deployment_profile_path)
 
-        # Construct the payload with the user information
-        payload = {
-            "principalType": user.get("principalType"),  # Type of principal (e.g., User, Group)
-            "identifier": user.get("identifier"),  # User identifier (e.g., email or user ID)
-            "groupUserAccessRight": user.get("access")  # Access rights (e.g., Admin, Member)
-        }
+        # Filter the deployment profiles for the environments and networks to be onboarded
+        deployment_operation_ws_details_df = all_deployment_profile_df[
+            (all_deployment_profile_df["to_be_onboarded"]) &
+            (all_deployment_profile_df["deployment_env"].str.strip().str.lower() == trimmed_lower_deployment_env) &
+            (all_deployment_profile_df["environment_type"].str.strip().str.lower() == trimmed_lower_environment_type) &
+            (all_deployment_profile_df["transformation_layer"].str.strip().str.lower() == "operations")
+        ]
 
-        # Make API request based on whether the authorization is a token or client
-        headers = {
-            "Authorization": f"Bearer {token}",  # Use the provided token for authentication
-            "Content-Type": "application/json"  # Specify content type as JSON
-        }
+        # Ensure there is at least one matching row
+        if deployment_operation_ws_details_df.empty:
+            raise ValueError("No matching deployment profile found.")
 
-        # Send POST request with headers and payload
-        response = requests.post(api_url, headers=headers, json=payload)
-        return response  # Return the response object
-    except Exception as e:
-        raise Exception(f"An error occurred in function send_request_user_to_workspace: {str(e)}")
+        # Extract the single record correctly
+        row = deployment_operation_ws_details_df.iloc[0]
+        # Use workspaceName from environment variable if provided, else from CSV
+        workspace_name = os.getenv("workspaceName", row["workspace_prefix"])
+        # If using trial workspace, ignore capacity_id
+        if workspace_name in ["VISACICDDev", "VISACICDQA"]:
+            capacity_id = None
+        else:
+            capacity_id = row.get("capacity_id", None)
         
-def add_users(workspace_id, token, users_to_add):
-    """
-    Batches users and sends them to the Power BI workspace.
-    
-    Parameters:
-    - workspace_id (str): The workspace ID.
-    - token (str): The authorization token.
-    - users_to_add (list): A list of users to add to the workspace.
-
-    Raises:
-    Exception: If an error occurs while adding users to the workspace.
-    """
-    
-    try:
-        # Loop through each user in the list of users to add
-        for user in users_to_add:
-            # Send a request to add the user to the workspace
-            response = send_request_user_to_workspace(workspace_id, token, user)
+        # Fix: Use the exact case from CSV but ensure it matches the artifact structure
+        transformation_layer = row["transformation_layer"].strip()
+        # Since the artifact structure uses "Operations" with capital O, ensure proper casing
+        if transformation_layer.lower() == "operations":
+            transformation_layer = "Operations"
             
-            # Raise an exception if the response status code is not 200 (success)
-            if response.status_code != 200:
-                raise Exception(
-                    f"Failed to add user: {response.status_code}, {response.text}"
-                )
-    
-    except Exception as e:
-        # Catch and raise any exceptions that occur during the process
-        raise Exception(f"Error occurred while adding users to workspace: {str(e)}")
+        workspace_users = row["workspace_default_groups"]
+        deployment_code = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        spn_access_token = get_spn_access_token(tenant_id, client_id, client_secret)
 
-def update_user_access(workspace_id, token, users_to_update):
-    """
-    Adds a user to the Power BI workspace.
-    
-    Parameters:
-    - workspace_id (str): The workspace ID.
-    - token (str): The authorization token.
-    - user (list): A dictionary containing user details to update access on the workspace.
+        print(f"=== Workspace Management for '{workspace_name}' ===")
         
-    Returns:
-    response: The response object from the API request.
-    
-    Raises:
-    Exception: If the API call fails or an error occurs.
-    """
-    
-    try:
-        # Loop through each user in the list of users to add
-        for user in users_to_update:
-            # Send a request to update access of the user to the workspace
-            api_url = f"https://api.powerbi.com/v1.0/myorg/groups/{workspace_id}/users"
+        # STEP 1: Try to find existing workspace first with multiple approaches
+        workspace_id = None
+        
+        # Approach 1: Use the existing function
+        print("Checking for existing workspace using does_workspace_exists_by_name...")
+        operations_workspace_details = get_workspace_by_name_with_retry(workspace_name, spn_access_token)
+        if operations_workspace_details and "id" in operations_workspace_details:
+            workspace_id = operations_workspace_details["id"]
+            print(f"✓ Found workspace using does_workspace_exists_by_name: {workspace_id}")
+        
+        # Approach 2: If not found, try listing all workspaces
+        if not workspace_id:
+            print("Workspace not found via name lookup. Trying to list all workspaces...")
+            try:
+                all_workspaces = list_all_workspaces(spn_access_token)
+                print(f"Found {len(all_workspaces)} total workspaces")
+                
+                for ws in all_workspaces:
+                    ws_name = ws.get("displayName", ws.get("name", ""))
+                    if ws_name == workspace_name:
+                        workspace_id = ws["id"]
+                        print(f"✓ Found workspace in workspace listing: {workspace_id}")
+                        break
+                        
+            except Exception as list_error:
+                print(f"✗ Could not list workspaces: {str(list_error)}")
 
-            # Construct the payload with the user information
-            payload = {
-                "principalType": user.get("principalType"),  # Type of principal (e.g., User, Group)
-                "identifier": user.get("identifier"),  # User identifier (e.g., email or user ID)
-                "groupUserAccessRight": user.get("access")  # Access rights (e.g., Admin, Member)
-            }
+        # STEP 2: Handle workspace creation or update
+        if workspace_id is None:
+            print(f"Workspace '{workspace_name}' does not exist. Creating new workspace...")
+            try:
+                # Create a new workspace with improved error handling
+                workspace_id = create_workspace_with_fallback(workspace_name, capacity_id, spn_access_token)
 
-            # Make API request based on whether the authorization is a token or client
-            headers = {
-                "Authorization": f"Bearer {token}",  # Use the provided token for authentication
-                "Content-Type": "application/json"  # Specify content type as JSON
-            }
-
-            # Send POST request with headers and payload
-            response = requests.put(api_url, headers=headers, json=payload)
-
-            # Raise an exception if the response status code is not 200 (success)
-            if response.status_code != 200:
-                raise Exception(
-                    f"Failed to update user access: {response.status_code}, {response.text}"
+                # Add security group/users to the new workspace
+                print("Adding security groups to the new workspace...")
+                are_user_added = add_security_group_to_workspace(
+                    workspace_id, workspace_name, spn_access_token, workspace_users
                 )
-    
+
+                # Mark the deployment as full
+                is_deployment = True
+                print("Performing full deployment to new workspace...")
+
+                # Deploy artifacts to the newly created workspace
+                deploy_artifacts(
+                    transformation_layer, connections_data, artifact_path,
+                    "ARM/" + transformation_layer, spn_access_token, workspace_id, workspace_name,
+                    is_deployment, items={}
+                )
+
+            except Exception as e:
+                # If creation fails and workspace was created, attempt cleanup
+                if workspace_id:
+                    try:
+                        print(f"Attempting to clean up workspace {workspace_id} due to deployment failure...")
+                        delete_workspace(workspace_id, spn_access_token)
+                        workspace_id = None
+                        print("Workspace cleanup completed.")
+                    except Exception as cleanup_error:
+                        print(f"Warning: Failed to clean up workspace: {str(cleanup_error)}")
+                
+                # Re-raise the exception after cleanup attempt
+                raise e
+
+        else:
+            print(f"Workspace '{workspace_name}' already exists with ID: {workspace_id}")
+            print("Performing incremental deployment to existing workspace...")
+            
+            try:
+                is_deployment = False
+
+                # Ensure the security group/users are still added to the workspace
+                print("Updating security groups on existing workspace...")
+                are_user_added = add_security_group_to_workspace(
+                    workspace_id, workspace_name, spn_access_token, workspace_users
+                )
+
+                # Fetch the list of existing items in the workspace
+                print("Fetching existing workspace items...")
+                items = list_workspace_all_items(workspace_id, spn_access_token)
+
+                # Delete outdated or obsolete items before deploying new ones
+                print("Cleaning up outdated items...")
+                are_items_deleted = delete_old_items(
+                    workspace_id, items, artifact_path, "ARM/" + transformation_layer, spn_access_token
+                )
+
+                # Wait for some time before redeploying to ensure deletions are processed
+                print("Waiting for cleanup operations to complete...")
+                time.sleep(450)
+
+                # Redeploy updated artifacts to the existing workspace
+                print("Deploying updated artifacts...")
+                deploy_artifacts(
+                    transformation_layer, connections_data, artifact_path,
+                    "ARM/" + transformation_layer, spn_access_token, workspace_id, workspace_name,
+                    is_deployment, items=items
+                )
+
+            except Exception as exc:
+                error_message = error_message + str(exc)
+
+        if error_message:
+            raise Exception(error_message)
+            
+        print(f"✓ Deployment completed successfully for workspace '{workspace_name}' (ID: {workspace_id})")
+        
     except Exception as e:
-        # Catch and raise any exceptions that occur during the process
-        raise Exception(f"Error occurred while updating access of users to workspace: {str(e)}")
+        print(f"✗ Deployment failed with error: {str(e)}")
+        raise e # Re-raise for debugging
 
-def remove_users(workspace_id, token, users_to_remove):
-    """
-    Batches users and sends them to the Power BI workspace.
-    
-    Parameters:
-    - workspace_id (str): The workspace ID.
-    - token (str): The authorization token.
-    - users_to_remove (dict): A list of users to remove from workspace.
-    
-    Raises:
-    Exception: If an error occurs while adding users to the workspace.
-    """
-
+if __name__ == "__main__":
     try:
-        api_url = f"https://api.powerbi.com/v1.0/myorg/groups/{workspace_id}/users"
+        # Preprocess the secret values to replace single quotes with double quotes
+        spn_secret_json_value = spn.replace("'", '"')
+        
+        # Attempt to parse the SPN secret JSON string into a Python dictionary
+        key_vault_spn_secrets = json.loads(spn_secret_json_value)
 
-        for user, access in users_to_remove.items():
-            if access is not None:
-                headers = {
-                    "Authorization": f"Bearer {token}",  # Use the provided token for authentication
-                    "Content-Type": "application/json"  # Specify content type as JSON
-                }
-                # Send POST request with headers and payload
-                response = requests.delete(f"{api_url}/{user}", headers=headers)
+        # Extract individual values from the parsed SPN secrets dictionary
+        tenant_id = key_vault_spn_secrets["tenant_id"]
+        client_id = key_vault_spn_secrets["client_id"]
+        client_secret = key_vault_spn_secrets["client_secret"]
 
-                # Raise an exception if the response status code is not 200 (success)
-                if response.status_code != 200:
-                    raise Exception(
-                        f"Failed to update user access: {response.status_code}, {response.text}"
-                    )
+        print("=== Starting Workspace Deployment Orchestration ===")
+        print(f"Environment: {deployment_env}")
+        print(f"Environment Type: {environment_type}")
+        print(f"Artifact Path: {artifact_path}")
+        
+        # Call the orchestrator function with the extracted values as arguments
+        orchestrator(tenant_id, client_id, client_secret, connections_data)
+        
+        print("=== Deployment Orchestration Completed Successfully ===")
     
     except Exception as e:
-        raise Exception(f"An error occurred while removing users from the workspace: {str(e)}")
-
-def add_security_group_to_workspace(workspace_id, workspace_name, token, user_info_str):
-    """
-    Adds security groups to a Power BI workspace. Handles adding multiple users in batches with error handling.
-    
-    Parameters:
-    - workspace_id (str): The ID of the Power BI workspace.
-    - token (str): The authorization token to access the Power BI API.
-    - user_info_str (str): A string of user details in JSON format, separated by "|".
-
-    """
-    try:
-        start_time = datetime.now(timezone.utc)
-        # Parse and clean the user info string into a list of dictionaries
-        user_info_list = parse_user_info(user_info_str)
-
-        # Validate no duplicates with different roles
-        validate_no_duplicates(user_info_list)
-
-        # List the current users in the workspace using API
-        current_users = list_current_workspace_users(workspace_id, token)
-
-        # Prepare the list of users to add
-        users_to_add, update_access, users_to_remove = prepare_users_to_add(user_info_list, current_users)
-
-        # Send request to add user through the API
-        add_users(workspace_id, token, users_to_add)
-        update_user_access(workspace_id, token, update_access)
-        remove_users(workspace_id, token, users_to_remove)
-
-    except Exception as e:
-        raise Exception(f"Error occurred while adding security group to workspace: {str(e)}")
+        print(f"=== Deployment Orchestration Failed ===")
+        print(f"Error: {str(e)}")
+        # If an error occurs during the execution, raise the exception
+        raise e
