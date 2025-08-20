@@ -1,69 +1,26 @@
 {
-  "reports": [
+  "PowerBI_reports": [
     {
-      "name": "Validation Logs Monitoring Import",
-      "url": "https://app.powerbi.com/groups/23998419-5678-4044-a3bf-81e2d9d18d22/reports/97294d11-ff55-4801-a8ab-1ccadb96d473/3c425ac70775790dd087?experience=power-bi",
+      "name": "Inventory Sample Report",
+      "url": "https://embedfastdev-app.azurewebsites.net/groups/40b2fd1e-c113-4d33-a139-3e46c8bc8e13/reports/68ac0481-49a4-4d15-a18c-98949b129fc7",
       "pages": [
         {
-          "name": "Current Run Summary",
+          "name": "Inventory and Transactions Analysis",
           "visuals": [
-            "Check Results by Check Type",
-            "Pass vs Fail %",
-            "Failed DQ Checks Details",
-            "Failed KPI Checks Details"
-          ]
-        },
-        {
-          "name": "Historical Trend and Analysis",
-          "visuals": [
-            "Pass vs Fail Trend over time",
-            "Fail Rate by Check Type",
-            "Historical Execution Logs"
+            "Quantity in Stock by Category",
+            "Transactions Over Time",
+            "Stock Distribution by Location"
           ]
         }
       ]
     },
     {
-      "name": "EMPN1550_Aman",
-      "url": "https://app.powerbi.com/groups/23998419-5678-4044-a3bf-81e2d9d18d22/reports/03b305c2-a9e7-4f82-857f-1480716910f3/5f5089329d541bb03701?experience=power-bi",
+      "name": "DEX Live Connected Inventory Management",
+      "url": "https://embedfastdev-app.azurewebsites.net/groups/40b2fd1e-c113-4d33-a139-3e46c8bc8e13/reports/1198cd3f-7f71-4371-8222-8dca3dea84a7",
       "pages": [
         {
-          "name": "Assignment 2",
-          "visuals": [
-            "Net Price by Brand"
-          ]
-        },
-        {
-          "name": "Assignment 3",
-          "visuals": [
-            "Quantity by Category"
-          ]
-        },
-        {
-          "name": "Assignment 4",
-          "visuals": [
-            "Count of Orders by Category"
-          ]
-        },
-        {
-          "name": "Assignment 5",
-          "visuals": [
-            "Sum of Net Price by AgeGroup"
-          ]
-        },
-        {
-          "name": "Assignment 6",
-          "visuals": [
-            "Sales Amount by Color",
-            "Sales Amount Column by Color"
-          ]
-        },
-        {
-          "name": "Assignment 7",
-          "visuals": [
-            "Discount % by Color",
-            "Discount % by Age Group"
-          ]
+          "name": "Inventory Overview",
+          "visuals": ["ALL"]
         }
       ]
     }
