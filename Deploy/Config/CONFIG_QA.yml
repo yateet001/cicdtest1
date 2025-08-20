@@ -1,0 +1,11 @@
+variables:
+  Env: "QA"
+  KeyVaultName: "KeyVaultName"
+  AdfAzureServiceConnection: "ConnectionName"
+  SpnSecretName: ""
+  BuildPipelineName: "BuildPipelineName"
+  ArtifactName: "Fabric"
+  Connections: >
+    {"Connections": [
+       {"connection_name": "WH_Uat", "type": "Fabric Warehouse"}
+     ]}

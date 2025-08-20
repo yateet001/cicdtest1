@@ -1,0 +1,164 @@
+trigger: none
+
+resources:
+  pipelines:
+    - pipeline: buildPipeline
+      source: Visa
+      trigger: 
+        enabled: true
+
+parameters:
+- name: Deployment_Environment 
+  displayName: "Deployment_Environment"
+  type: string
+  default: "DEV"
+  values:
+    - "DEV"
+    - "QA"
+
+- name: Environment_Type 
+  displayName: "Environment_Type"
+  type: string
+  default: "Primary"
+  values:
+    - "Primary"
+    - "Secondary"
+
+- name: TriggeringBuildId
+  displayName: "Triggering Build ID (optional - leave empty for auto-detect)"
+  type: string
+  default: ""
+
+variables:
+  - group: Fabric-${{ parameters.Deployment_Environment }}
+  - name: ArtifactName
+    value: 'Fabric'  # Default artifact name, adjust if your pipeline uses a different name
+
+stages:
+- stage: Approval_Stage_${{parameters.Deployment_Environment}}
+  jobs:
+  - deployment: Approval
+    environment: ${{parameters.Deployment_Environment}}-Deploy
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo "Approval stage for ${{ parameters.Deployment_Environment }} environment"
+
+- stage: DeployCodeToWorkspace
+  displayName: "Deployment Stage"
+  dependsOn: Approval_Stage_${{parameters.Deployment_Environment}}
+  jobs:
+    - job: InvokePythonOrchestratorFunction
+      timeoutInMinutes: 360
+      displayName: "Invoke the Python orchestrator function for deployment"
+      pool:
+        vmImage: "ubuntu-latest"
+
+      steps:
+        - task: UsePythonVersion@0
+          inputs:
+            versionSpec: "3.x"
+            addToPath: true
+
+        - script: |
+            python -m pip install --upgrade pip
+            python -m pip install pandas requests azure-storage-file-datalake azure-identity pyyaml
+          displayName: "Install Python dependencies"
+
+        # Debug step to check triggering pipeline information
+        - script: |
+            echo "=== Pipeline Trigger Debug Information ==="
+            echo "Build.Reason: $(Build.Reason)"
+            echo "Build.TriggeredBy.BuildId: $(Build.TriggeredBy.BuildId)"
+            echo "Build.TriggeredBy.BuildNumber: $(Build.TriggeredBy.BuildNumber)"
+            echo "Build.TriggeredBy.DefinitionId: $(Build.TriggeredBy.DefinitionId)"
+            echo "Build.TriggeredBy.DefinitionName: $(Build.TriggeredBy.DefinitionName)"
+            echo "Build.TriggeredBy.ProjectId: $(Build.TriggeredBy.ProjectId)"
+            echo "Resources.Pipeline.buildPipeline.RunID: $(Resources.Pipeline.buildPipeline.RunID)"
+            echo "Resources.Pipeline.buildPipeline.RunName: $(Resources.Pipeline.buildPipeline.RunName)"
+            echo "Resources.Pipeline.buildPipeline.SourceBranch: $(Resources.Pipeline.buildPipeline.SourceBranch)"
+            echo "Manual TriggeringBuildId parameter: ${{ parameters.TriggeringBuildId }}"
+          displayName: "Debug Pipeline Trigger Information"
+
+        # Conditional download task - Method 1: Using triggering build ID
+        - task: DownloadPipelineArtifact@2
+          displayName: "Download Artifacts from Triggering Pipeline"
+          condition: and(succeeded(), ne(variables['Build.TriggeredBy.BuildId'], ''))
+          inputs:
+            source: 'specific'
+            project: '$(System.TeamProject)'
+            pipeline: 'Visa'
+            runId: '$(Build.TriggeredBy.BuildId)'
+            preferTriggeringPipeline: true
+            artifact: '$(ArtifactName)'
+            path: '$(Pipeline.Workspace)/ELM'
+
+        # Conditional download task - Method 2: Using manual parameter
+        - task: DownloadPipelineArtifact@2
+          displayName: "Download Artifacts using Manual Build ID"
+          condition: and(succeeded(), ne('${{ parameters.TriggeringBuildId }}', ''), eq(variables['Build.TriggeredBy.BuildId'], ''))
+          inputs:
+            source: 'specific'
+            project: '$(System.TeamProject)'
+            pipeline: 'Visa'
+            runId: '${{ parameters.TriggeringBuildId }}'
+            preferTriggeringPipeline: true
+            artifact: '$(ArtifactName)'
+            path: '$(Pipeline.Workspace)/ELM'
+
+        # Alternative download using resource pipeline RunID
+        - task: DownloadPipelineArtifact@2
+          displayName: "Download Artifacts using Resource Pipeline RunID"
+          condition: and(succeeded(), eq(variables['Build.TriggeredBy.BuildId'], ''), eq('${{ parameters.TriggeringBuildId }}', ''), ne(variables['Resources.Pipeline.buildPipeline.RunID'], ''))
+          inputs:
+            source: 'specific'
+            project: '$(System.TeamProject)'
+            pipeline: 'Visa'
+            runId: '$(Resources.Pipeline.buildPipeline.RunID)'
+            artifact: '$(ArtifactName)'
+            path: '$(Pipeline.Workspace)/ELM'
+
+        # Final fallback - download latest successful run
+        - task: DownloadPipelineArtifact@2
+          displayName: "Download Artifacts from Latest Successful Run (Fallback)"
+          condition: and(succeeded(), eq(variables['Build.TriggeredBy.BuildId'], ''), eq('${{ parameters.TriggeringBuildId }}', ''), eq(variables['Resources.Pipeline.buildPipeline.RunID'], ''))
+          inputs:
+            source: 'specific'
+            project: '$(System.TeamProject)'
+            pipeline: 'Visa'
+            runVersion: 'latest'
+            artifact: '$(ArtifactName)'
+            path: '$(Pipeline.Workspace)/ELM'
+
+        # Verify download was successful
+        - script: |
+            echo "=== Artifact Download Verification ==="
+            if [ -d "$(Pipeline.Workspace)/ELM" ]; then
+                echo "✓ Artifact directory exists"
+                echo "Contents of $(Pipeline.Workspace)/ELM:"
+                ls -la "$(Pipeline.Workspace)/ELM"
+            else
+                echo "✗ Artifact directory does not exist"
+                echo "Available directories in $(Pipeline.Workspace):"
+                ls -la "$(Pipeline.Workspace)"
+                exit 1
+            fi
+          displayName: "Verify Artifact Download"
+
+        - script: |
+            echo "Debugging information:"
+            echo "Artifact path: $(Pipeline.Workspace)/ELM"
+            echo "Build number: $(Build.TriggeredBy.BuildNumber)"
+            echo "Deployment environment: ${{ parameters.Deployment_Environment }}"
+            
+            python Deploy/Common/deployment_main.py
+          displayName: "Invoke orchestrator function"
+          env:
+            spn: $(spn)
+            deployment_env: ${{parameters.Deployment_Environment}}
+            environment_type: ${{parameters.Environment_Type}}
+            artifact_path: "$(Pipeline.Workspace)/ELM"
+            build_number: $(Build.TriggeredBy.BuildNumber)
+            start_time: $(Build.StartTime)
+            connections: $(connections)

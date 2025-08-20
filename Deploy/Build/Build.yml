@@ -1,0 +1,32 @@
+trigger: none
+
+pool:
+  vmImage: "ubuntu-latest"
+
+parameters:
+- name: Deployment_Environment 
+  displayName: "Deployment_Environment"
+  type: string
+  default: "DEV"
+  values:
+    - "DEV"
+    - "QA"
+
+variables:
+  - template: /Deploy/Config/CONFIG_${{ parameters.Deployment_Environment }}.yml
+
+steps:
+# Step 1: Copy Git Files to the Artifact Staging Directory
+- task: CopyFiles@2
+  displayName: "Copy Git Files to: $(Build.ArtifactStagingDirectory)"
+  inputs:
+    SourceFolder: $(Build.SourcesDirectory)  # The directory where your repository is cloned
+    TargetFolder: $(Build.ArtifactStagingDirectory)/ARM
+
+# Step 2: Publish the pipeline artifact
+- task: PublishPipelineArtifact@1
+  displayName: "Publish Pipeline Artifact"
+  inputs:
+    path: $(Build.ArtifactStagingDirectory)  # Path where the artifacts were copied
+    artifactName: ${{ variables.ArtifactName }}  # Artifact name
+    publishLocation: "pipeline"  # Specifies that the artifact will be published to the pipeline
