@@ -470,7 +470,7 @@ function Deploy-SemanticModel {
         $smDir = Split-Path $modelBimFile.FullName -Parent
         $allSmFiles = Get-ChildItem -Path $smDir -Recurse -File
         foreach ($file in $allSmFiles) {
-            $relativePath = ($file.FullName.Substring($smDir.Length)).TrimStart('\\','/')
+            $relativePath = ($file.FullName.Substring($smDir.Length) -replace '^[\\/]+','')
             $relativePath = $relativePath -replace '\\','/'
             if ([System.String]::Equals([System.IO.Path]::GetFileName($file.FullName), 'model.bim', [System.StringComparison]::OrdinalIgnoreCase)) {
                 # Use the in-memory modified model definition
@@ -631,7 +631,7 @@ function Deploy-Report {
         $allFiles = Get-ChildItem -Path $ReportFolder -Recurse -File
         $parts = @()
         foreach ($file in $allFiles) {
-            $relativePath = ($file.FullName.Substring($ReportFolder.Length)).TrimStart('\\','/')
+            $relativePath = ($file.FullName.Substring($ReportFolder.Length) -replace '^[\\/]+','')
             $relativePath = $relativePath -replace '\\','/'
             $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
             $b64 = [Convert]::ToBase64String($bytes)
