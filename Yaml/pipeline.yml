@@ -6,8 +6,8 @@ pool:
 variables:
   artifact_path: '$(Build.ArtifactStagingDirectory)'  # Directory for downloaded artifacts
   config_file: 'Config/config.json'  # Path to config file containing credentials and settings
-  deployment_profile_dev: 'Configuration/Deployement_profile_dev.csv'  # Deployment profile for Dev environment
-  deployment_profile_prod: 'Configuration/Deployement_profile_prod.csv'  # Deployment profile for Prod environment
+  deployment_profile_dev: 'Configuration/Dev/DEPLOYMENT_PROFILE.csv'  # Deployment profile for Dev environment
+  deployment_profile_prod: 'Configuration/Prod/DEPLOYMENT_PROFILE.csv'  # Deployment profile for Prod environment
   output_folder: 'OutputLogs'  # Folder for output logs
 
 parameters:
@@ -60,24 +60,6 @@ stages:
         pool:
           vmImage: 'windows-latest'
         steps:
-        
-          # Step 1: Install .NET SDK
-          - task: UseDotNet@2
-            displayName: 'Install .NET SDK'
-            inputs:
-              packageType: 'sdk'
-              version: '6.x'
-
-          # Step 2: Install Power BI Desktop
-          - task: PowerShell@2
-            displayName: 'Install Power BI Desktop'
-            inputs:
-              targetType: inline
-              script: |
-                $msiUrl = "https://go.microsoft.com/fwlink/?linkid=2216531"
-                $msiPath = "$(Build.ArtifactStagingDirectory)\PBIDesktopInstaller.msi"
-                Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath
-                Start-Process msiexec.exe -Wait -ArgumentList "/i `"$msiPath`" /quiet /norestart"
 
           # Step 3: Create Output Directory
           - task: PowerShell@2

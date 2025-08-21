@@ -358,7 +358,11 @@ function Deploy-SemanticModel {
         [Parameter(Mandatory=$true)]
         [string]$AccessToken,
         [Parameter(Mandatory=$true)]
-        [string]$ModelName
+        [string]$ModelName,
+        [Parameter(Mandatory=$true)]
+        [string]$ServerName,
+        [Parameter(Mandatory=$true)]
+        [string]$DatabaseName
     )
     
     try {
@@ -369,9 +373,50 @@ function Deploy-SemanticModel {
         if (-not $modelBimFile) {
             throw "model.bim file not found in semantic model folder"
         }
-        
-        $modelDefinition = Get-Content $modelBimFile.FullName -Raw
-        Write-Host "Model definition loaded: $($modelDefinition.Length) characters"
+
+        # Load and update the model definition for connection switching
+        $modelDefinitionRaw = Get-Content $modelBimFile.FullName -Raw
+        Write-Host "Model definition loaded: $($modelDefinitionRaw.Length) characters"
+
+        try {
+            $modelJson = $modelDefinitionRaw | ConvertFrom-Json
+        } catch {
+            throw "Failed to parse model.bim JSON: $_"
+        }
+
+        $updatesApplied = 0
+        if ($modelJson.model -and $modelJson.model.tables) {
+            foreach ($table in $modelJson.model.tables) {
+                if ($table.partitions) {
+                    foreach ($partition in $table.partitions) {
+                        if ($partition.source -and $partition.source.type -eq 'm' -and $partition.source.expression) {
+                            $pattern = 'Sql\.Database\(".*?"\s*,\s*".*?"\)'
+                            $replacement = 'Sql.Database("' + $ServerName + '", "' + $DatabaseName + '")'
+
+                            if ($partition.source.expression -is [System.Array]) {
+                                $newExpr = @()
+                                foreach ($line in $partition.source.expression) {
+                                    $newExpr += ($line -replace $pattern, $replacement)
+                                }
+                                $partition.source.expression = $newExpr
+                                $updatesApplied++
+                            } elseif ($partition.source.expression -is [string]) {
+                                $partition.source.expression = ($partition.source.expression -replace $pattern, $replacement)
+                                $updatesApplied++
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($updatesApplied -gt 0) {
+            Write-Host "✓ Connection switching applied to $updatesApplied partition(s)"
+        } else {
+            Write-Warning "No Sql.Database() expressions found to update in model.bim"
+        }
+
+        $modelDefinition = $modelJson | ConvertTo-Json -Depth 100
         
         # Updated payload structure for Fabric API semantic models
         $deploymentPayload = @{
@@ -606,7 +651,11 @@ function Deploy-PBIPUsingFabricAPI {
         [string]$WorkspaceId,
         [Parameter(Mandatory=$true)]
         [string]$AccessToken,
-        [string]$Takeover = "True"
+        [string]$Takeover = "True",
+        [Parameter(Mandatory=$true)]
+        [string]$ServerName,
+        [Parameter(Mandatory=$true)]
+        [string]$DatabaseName
     )
     
     try {
@@ -638,7 +687,7 @@ function Deploy-PBIPUsingFabricAPI {
         
         # Step 4: Deploy Semantic Model
         Write-Host "`n--- STEP 4: SEMANTIC MODEL DEPLOYMENT ---"
-        $semanticModelResult = Deploy-SemanticModel -SemanticModelFolder $validation.SemanticModelFolder -WorkspaceId $WorkspaceId -AccessToken $AccessToken -ModelName $ReportName
+        $semanticModelResult = Deploy-SemanticModel -SemanticModelFolder $validation.SemanticModelFolder -WorkspaceId $WorkspaceId -AccessToken $AccessToken -ModelName $ReportName -ServerName $ServerName -DatabaseName $DatabaseName
         
         if (-not $semanticModelResult.Success) {
             throw "Semantic model deployment failed: $($semanticModelResult.Error)"
@@ -752,7 +801,7 @@ try {
         throw "Configuration file not found: $ConfigFile"
     }
 
-    $config = Get-Content $ConfigFile | ConvertFrom-Json
+    $config = Get-Content -Raw $ConfigFile | ConvertFrom-Json
     Write-Host "Configuration loaded successfully"
 
     # Get SPN credentials from config
@@ -771,7 +820,7 @@ try {
             $targetWorkspaceId = $config.DevWorkspaceID
         }
         "PROD" {
-            $targetWorkspaceId = $config.UATWorkspaceID
+            $targetWorkspaceId = $config.ProdWorkspaceID
         }
         default {
             throw "Unsupported environment: $Workspace. Only DEV and PROD are supported."
@@ -829,8 +878,18 @@ try {
         $reportName = [System.IO.Path]::GetFileNameWithoutExtension($pbipFile.Name)
         Write-Host "`nProcessing PBIP: $reportName"
         Write-Host "File path: $($pbipFile.FullName)"
-        
-        $deploymentSuccess = Deploy-PBIPUsingFabricAPI -PBIPFilePath $pbipFile.FullName -ReportName $reportName -WorkspaceId $targetWorkspaceId -AccessToken $accessToken
+
+        # Determine connection settings based on target environment
+        if ($Workspace.ToUpper() -eq 'DEV') {
+            $serverName = $config.DevWarehouseConnection
+            $databaseName = $config.DevWarehouseName
+        } else {
+            $serverName = $config.ProdWarehouseConnection
+            $databaseName = $config.ProdWarehouseName
+        }
+        Write-Host "Using connection -> Server: $serverName | Database: $databaseName"
+
+        $deploymentSuccess = Deploy-PBIPUsingFabricAPI -PBIPFilePath $pbipFile.FullName -ReportName $reportName -WorkspaceId $targetWorkspaceId -AccessToken $accessToken -ServerName $serverName -DatabaseName $databaseName
         
         $result = [PSCustomObject]@{
             ReportName = $reportName
