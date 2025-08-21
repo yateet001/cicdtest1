@@ -173,6 +173,42 @@ function Verify-WorkspaceAccess {
     }
 }
 
+function Wait-FabricOperationCompletion {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$OperationStatusUrl,
+        [Parameter(Mandatory=$true)]
+        [string]$AccessToken,
+        [int]$MaxWaitSeconds = 180
+    )
+
+    $headers = @{
+        "Authorization" = "Bearer $AccessToken"
+        "Content-Type" = "application/json"
+    }
+
+    $elapsed = 0
+    $interval = 5
+    while ($elapsed -lt $MaxWaitSeconds) {
+        try {
+            $resp = Invoke-RestMethod -Uri $OperationStatusUrl -Method Get -Headers $headers -ErrorAction Stop
+            $status = $resp.status
+            if (-not $status) { $status = $resp.state }
+            if ($status -and ($status -in @('Succeeded','Completed'))) { return $true }
+            if ($status -and ($status -in @('Failed','Error'))) {
+                Write-Error "Fabric operation failed: $($resp | ConvertTo-Json -Depth 10)"
+                return $false
+            }
+        } catch {
+            Write-Warning "Failed to poll operation status: $($_.Exception.Message)"
+        }
+        Start-Sleep -Seconds $interval
+        $elapsed += $interval
+    }
+    Write-Warning "Operation did not complete within $MaxWaitSeconds seconds"
+    return $false
+}
+
 function List-WorkspaceItems {
     param(
         [Parameter(Mandatory=$true)]
@@ -429,25 +465,28 @@ function Deploy-SemanticModel {
 
         $modelDefinition = $modelJson | ConvertTo-Json -Depth 100
         
-        # Build parts for semantic model (include model.bim, diagramLayout.json, definition.pbism if present)
+        # Build parts for semantic model (include all files under the SemanticModel folder)
         $smParts = @()
         $smDir = Split-Path $modelBimFile.FullName -Parent
-        $filesToInclude = @('model.bim','diagramLayout.json','definition.pbism')
-        foreach ($name in $filesToInclude) {
-            $p = Join-Path $smDir $name
-            if (Test-Path $p) {
-                $bytes = [System.IO.File]::ReadAllBytes($p)
-                $b64 = [Convert]::ToBase64String($bytes)
-                $rel = Split-Path $p -Leaf
-                $smParts += @{ path = $rel; payload = $b64; payloadType = 'InlineBase64' }
+        $allSmFiles = Get-ChildItem -Path $smDir -Recurse -File
+        foreach ($file in $allSmFiles) {
+            $relativePath = ($file.FullName.Substring($smDir.Length)).TrimStart('\\','/')
+            $relativePath = $relativePath -replace '\\','/'
+            if ([System.String]::Equals([System.IO.Path]::GetFileName($file.FullName), 'model.bim', [System.StringComparison]::OrdinalIgnoreCase)) {
+                # Use the in-memory modified model definition
+                $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($modelDefinition)
+            } else {
+                $payloadBytes = [System.IO.File]::ReadAllBytes($file.FullName)
             }
+            $b64 = [Convert]::ToBase64String($payloadBytes)
+            $smParts += @{ path = $relativePath; payload = $b64; payloadType = 'InlineBase64' }
         }
 
-        $deploymentPayload = @{
+        $itemsCreatePayload = @{
             displayName = $ModelName
-            description = "Semantic model deployed from PBIP: $ModelName"
-            definition = @{ parts = $smParts }
-        } | ConvertTo-Json -Depth 50
+            type = 'SemanticModel'
+            definition = @{ format = 'PBISM'; parts = $smParts }
+        } | ConvertTo-Json -Depth 100
         
         $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
         
@@ -457,26 +496,26 @@ function Deploy-SemanticModel {
         }
         
         try {
-            # Prefer dedicated semanticModels endpoint for creation
-            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayload -Headers $headers
-            $modelId = $response.id
+            # Create via Items API first to ensure PBISM format is respected
+            $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
+            $createResp = Invoke-WebRequest -Uri $createUrl -Method Post -Body $itemsCreatePayload -Headers $headers
+            $modelId = $null
+            $content = $null
+            try { $content = $createResp.Content | ConvertFrom-Json } catch {}
+            if ($content -and $content.id) { $modelId = $content.id }
             if (-not $modelId) {
-                Write-Warning "semanticModels endpoint returned no id; trying to resolve by name..."
+                $opLocation = $createResp.Headers['Operation-Location']
+                if (-not $opLocation) { $opLocation = $createResp.Headers['operation-location'] }
+                if ($opLocation) {
+                    Write-Host "Waiting for semantic model creation operation to complete..."
+                    $opOk = Wait-FabricOperationCompletion -OperationStatusUrl $opLocation -AccessToken $AccessToken -MaxWaitSeconds 180
+                    if (-not $opOk) { throw "Semantic model creation operation did not complete successfully" }
+                }
+                # Resolve by name
                 $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
                 $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
                 $existing = $listResponse.value | Where-Object { $_.displayName -eq $ModelName } | Select-Object -First 1
                 if ($existing) { $modelId = $existing.id }
-            }
-            if (-not $modelId) {
-                # Final fallback: Items API create
-                $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-                $createPayload = @{
-                    "displayName" = $ModelName
-                    "type" = "SemanticModel"
-                    "definition" = (@($deploymentPayload | ConvertFrom-Json).definition)
-                } | ConvertTo-Json -Depth 20
-                $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $createPayload -Headers $headers
-                $modelId = $response.id
             }
             if (-not $modelId) { throw "Semantic model id could not be determined after creation" }
 
@@ -603,10 +642,10 @@ function Deploy-Report {
             }
         }
 
-        $deploymentPayload = @{
+        $itemsReportPayload = @{
             displayName = $ReportName
-            description = "Report deployed from PBIP: $ReportName"
-            definition = @{ parts = $parts }
+            type = 'Report'
+            definition = @{ format = 'PBIR'; parts = $parts }
         }
         
         # Add semantic model binding if provided
@@ -615,7 +654,7 @@ function Deploy-Report {
             Write-Host "Binding report to semantic model ID: $SemanticModelId"
         }
         
-        $deploymentPayloadJson = $deploymentPayload | ConvertTo-Json -Depth 50
+        $deploymentPayloadJson = $itemsReportPayload | ConvertTo-Json -Depth 50
         
         $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
         
@@ -637,8 +676,9 @@ function Deploy-Report {
                 throw "Dataset (SemanticModel) id is missing and could not be resolved."
             }
 
-            # Prefer dedicated reports endpoint for creation
-            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayloadJson -Headers $headers
+            # Prefer Items API for PBIP report creation
+            $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
+            $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $deploymentPayloadJson -Headers $headers
             Write-Host "✓ Report deployed successfully"
             Write-Host "Report ID: $($response.id)"
             return $true
@@ -701,15 +741,10 @@ function Deploy-Report {
                 # Fallback: Try Items API create explicitly if dedicated endpoint failed for non-409
                 try {
                     $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-                    $createPayloadObj = @{
-                        displayName = $ReportName
-                        type = "Report"
-                        definition = (@($deploymentPayload | ConvertFrom-Json).definition)
-                        datasetId = $SemanticModelId
-                    }
-                    if (-not $SemanticModelId) { $createPayloadObj.Remove('datasetId') }
-                    $createPayload = $createPayloadObj | ConvertTo-Json -Depth 20
-                    $response2 = Invoke-RestMethod -Uri $createUrl -Method Post -Body $createPayload -Headers $headers
+                    $payloadObj = $itemsReportPayload.PSObject.Copy()
+                    if ($SemanticModelId) { $payloadObj["datasetId"] = $SemanticModelId }
+                    $payload = $payloadObj | ConvertTo-Json -Depth 50
+                    $response2 = Invoke-RestMethod -Uri $createUrl -Method Post -Body $payload -Headers $headers
                     Write-Host "✓ Report deployed via Items API"
                     return $true
                 } catch {
