@@ -364,18 +364,27 @@ function Verify-DeploymentResult {
             "Content-Type" = "application/json"
         }
         
-        # Get all workspace items
-        $uri = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-        $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
-        
-        # Check for semantic model
-        $semanticModel = $response.value | Where-Object { 
-            $_.displayName -eq $SemanticModelName -and $_.type -eq "SemanticModel" 
-        }
-        
-        # Check for report
-        $report = $response.value | Where-Object { 
-            $_.displayName -eq $ReportName -and $_.type -eq "Report" 
+        # Prefer dedicated endpoints to avoid eventual consistency issues on /items
+        $semanticModel = $null
+        $report = $null
+        try {
+            $smUri = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
+            $smResp = Invoke-RestMethod -Uri $smUri -Method Get -Headers $headers
+            $semanticModel = $smResp.value | Where-Object { $_.displayName -eq $SemanticModelName } | Select-Object -First 1
+        } catch { Write-Warning "Failed to query semanticModels endpoint: $_" }
+        try {
+            $rpUri = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
+            $rpResp = Invoke-RestMethod -Uri $rpUri -Method Get -Headers $headers
+            $report = $rpResp.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
+        } catch { Write-Warning "Failed to query reports endpoint: $_" }
+        if (-not $semanticModel -or -not $report) {
+            # Fallback to aggregated items
+            try {
+                $uri = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
+                $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
+                if (-not $semanticModel) { $semanticModel = $response.value | Where-Object { $_.displayName -eq $SemanticModelName -and $_.type -eq "SemanticModel" } | Select-Object -First 1 }
+                if (-not $report) { $report = $response.value | Where-Object { $_.displayName -eq $ReportName -and $_.type -eq "Report" } | Select-Object -First 1 }
+            } catch { Write-Warning "Failed to query aggregated items endpoint: $_" }
         }
         
         return @{
