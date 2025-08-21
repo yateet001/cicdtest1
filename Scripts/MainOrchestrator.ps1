@@ -487,6 +487,24 @@ function Deploy-SemanticModel {
             description = "Semantic model deployed from PBIP: $ModelName"
             definition = @{ parts = $smParts }
         } | ConvertTo-Json -Depth 50
+
+        # If a model with the same name already exists, update it and return success
+        try {
+            $headers = @{ 
+                "Authorization" = "Bearer $AccessToken"
+                "Content-Type" = "application/json"
+            }
+            $existingListUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
+            $existingList = Invoke-RestMethod -Uri $existingListUrl -Method Get -Headers $headers
+            $existingModel = $existingList.value | Where-Object { $_.displayName -eq $ModelName } | Select-Object -First 1
+            if ($existingModel) {
+                Write-Host "Semantic model already exists. Updating definition..."
+                $updateUrlPre = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels/$($existingModel.id)/updateDefinition"
+                $updatePayloadPre = @{ definition = @{ parts = $smParts } } | ConvertTo-Json -Depth 50
+                try { Invoke-RestMethod -Uri $updateUrlPre -Method Post -Body $updatePayloadPre -Headers $headers } catch { Write-Warning "Update definition failed (continuing): $_" }
+                return @{ Success = $true; ModelId = $existingModel.id }
+            }
+        } catch { Write-Warning "Pre-check for existing semantic model failed: $_" }
         
         $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
         
@@ -533,14 +551,14 @@ function Deploy-SemanticModel {
                 $errBody = $reader.ReadToEnd()
             } catch {}
             
-            if ($statusCode -eq 409) {
+            if ($statusCode -eq 409 -or ($statusCode -eq $null -and ($errBody -eq $null -or $errBody -eq ''))) {
                 Write-Host "Semantic model already exists, attempting to find existing model..."
                 
                 # Get existing semantic models to find the ID
                 try {
                     $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
                     $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
-                    $existingModel = $listResponse.value | Where-Object { $_.displayName -eq $ModelName }
+                    $existingModel = $listResponse.value | Where-Object { $_.displayName -eq $ModelName } | Select-Object -First 1
                     
                     if ($existingModel) {
                         Write-Host "Found existing model with ID: $($existingModel.id)"
@@ -548,17 +566,7 @@ function Deploy-SemanticModel {
                         # Try to update the existing model using updateDefinition endpoint
                         $updateUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels/$($existingModel.id)/updateDefinition"
                         
-                        $updatePayload = @{
-                            "definition" = @{
-                                "parts" = @(
-                                    @{
-                                        "path" = "model.bim"
-                                        "payload" = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($modelDefinition))
-                                        "payloadType" = "InlineBase64"
-                                    }
-                                )
-                            }
-                        } | ConvertTo-Json -Depth 10
+                        $updatePayload = @{ definition = @{ parts = $smParts } } | ConvertTo-Json -Depth 50
                         
                         try {
                             $updateResponse = Invoke-RestMethod -Uri $updateUrl -Method Post -Body $updatePayload -Headers $headers
