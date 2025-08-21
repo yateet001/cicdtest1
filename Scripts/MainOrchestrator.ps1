@@ -634,7 +634,11 @@ function Deploy-Report {
             $relativePath = $relativePath -replace '\\','/'
             $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
             $b64 = [Convert]::ToBase64String($bytes)
-            $parts += @{ path = $relativePath; payload = $b64; payloadType = 'InlineBase64' }
+            $parts += @{
+                path = $relativePath
+                payload = $b64
+                payloadType = 'InlineBase64'
+            }
         }
 
         $itemsReportPayload = @{
@@ -643,20 +647,11 @@ function Deploy-Report {
             definition = @{ format = 'PBIR'; parts = $parts }
         }
         
-        # Resolve or add semantic model binding
-        if (-not $SemanticModelId) {
-            # Try to resolve dataset id by name
-            Write-Warning "SemanticModelId not provided; resolving by report/semantic model name..."
-            $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
-            $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
-            $existingModel = $listResponse.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
-            if ($existingModel) { $SemanticModelId = $existingModel.id }
+        # Add semantic model binding if provided
+        if ($SemanticModelId) {
+            $deploymentPayload["datasetId"] = $SemanticModelId
+            Write-Host "Binding report to semantic model ID: $SemanticModelId"
         }
-        if (-not $SemanticModelId) {
-            throw "Dataset (SemanticModel) id is missing and could not be resolved."
-        }
-        $itemsReportPayload["datasetId"] = $SemanticModelId
-        Write-Host "Binding report to semantic model ID: $SemanticModelId"
         
         $deploymentPayloadJson = $itemsReportPayload | ConvertTo-Json -Depth 50
         
@@ -668,6 +663,18 @@ function Deploy-Report {
         }
         
         try {
+            if (-not $SemanticModelId) {
+                # Try to resolve dataset id by name
+                Write-Warning "SemanticModelId not provided; resolving by report/semantic model name..."
+                $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
+                $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
+                $existingModel = $listResponse.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
+                if ($existingModel) { $SemanticModelId = $existingModel.id }
+            }
+            if (-not $SemanticModelId) {
+                throw "Dataset (SemanticModel) id is missing and could not be resolved."
+            }
+
             # Prefer Items API for PBIP report creation
             $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
             $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $deploymentPayloadJson -Headers $headers
@@ -733,12 +740,8 @@ function Deploy-Report {
                 # Fallback: Try Items API create explicitly if dedicated endpoint failed for non-409
                 try {
                     $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-                    $payloadObj = @{
-                        displayName = $ReportName
-                        type = 'Report'
-                        definition = @{ format = 'PBIR'; parts = $parts }
-                        datasetId = $SemanticModelId
-                    }
+                    $payloadObj = $itemsReportPayload.PSObject.Copy()
+                    if ($SemanticModelId) { $payloadObj["datasetId"] = $SemanticModelId }
                     $payload = $payloadObj | ConvertTo-Json -Depth 50
                     $response2 = Invoke-RestMethod -Uri $createUrl -Method Post -Body $payload -Headers $headers
                     Write-Host "✓ Report deployed via Items API"
