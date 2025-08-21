@@ -666,6 +666,18 @@ function Deploy-Report {
         $headers = @{ "Authorization" = "Bearer $AccessToken"; "Content-Type" = "application/json" }
         $typedPayloadJson = @{ displayName = $ReportName; definition = @{ parts = @($reportJsonPart) }; datasetId = $SemanticModelId } | ConvertTo-Json -Depth 50
         
+        # Guard: if a report with the same name exists and points to a different semantic model, delete and recreate
+        try {
+            $listUrlPre = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
+            $listRespPre = Invoke-RestMethod -Uri $listUrlPre -Method Get -Headers $headers
+            $conflict = $listRespPre.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
+            if ($conflict -and $conflict.datasetId -and ($conflict.datasetId -ne $SemanticModelId)) {
+                Write-Warning "Existing report with same name bound to different semantic model. Deleting for clean redeploy..."
+                $delUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports/$($conflict.id)"
+                try { Invoke-RestMethod -Uri $delUrl -Method Delete -Headers $headers } catch { Write-Warning "Failed to delete conflicting report: $_" }
+            }
+        } catch { Write-Warning "Pre-check for existing report failed: $_" }
+        
         try {
             # Prefer typed reports endpoint for creation
             $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $typedPayloadJson -Headers $headers
