@@ -662,7 +662,7 @@ function Deploy-Report {
         $payloadObj = @{
             displayName = $ReportName
             type = 'Report'
-            definition = @{ format = 'PBIR'; parts = $parts }
+            definition = @{ format = 'PBIP'; parts = $parts }
             datasetId = $SemanticModelId
         }
         
@@ -736,7 +736,7 @@ function Deploy-Report {
                     $payloadObj = @{
                         displayName = $ReportName
                         type = 'Report'
-                        definition = @{ format = 'PBIR'; parts = $parts }
+                        definition = @{ format = 'PBIP'; parts = $parts }
                         datasetId = $SemanticModelId
                     }
                     $payload = $payloadObj | ConvertTo-Json -Depth 50
