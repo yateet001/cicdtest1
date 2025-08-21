@@ -429,20 +429,25 @@ function Deploy-SemanticModel {
 
         $modelDefinition = $modelJson | ConvertTo-Json -Depth 100
         
-        # Updated payload structure for Fabric API semantic models
-        $deploymentPayload = @{
-            "displayName" = $ModelName
-            "description" = "Semantic model deployed from PBIP: $ModelName"
-            "definition" = @{
-                "parts" = @(
-                    @{
-                        "path" = "model.bim"
-                        "payload" = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($modelDefinition))
-                        "payloadType" = "InlineBase64"
-                    }
-                )
+        # Build parts for semantic model (include model.bim, diagramLayout.json, definition.pbism if present)
+        $smParts = @()
+        $smDir = Split-Path $modelBimFile.FullName -Parent
+        $filesToInclude = @('model.bim','diagramLayout.json','definition.pbism')
+        foreach ($name in $filesToInclude) {
+            $p = Join-Path $smDir $name
+            if (Test-Path $p) {
+                $bytes = [System.IO.File]::ReadAllBytes($p)
+                $b64 = [Convert]::ToBase64String($bytes)
+                $rel = Split-Path $p -Leaf
+                $smParts += @{ path = $rel; payload = $b64; payloadType = 'InlineBase64' }
             }
-        } | ConvertTo-Json -Depth 10
+        }
+
+        $deploymentPayload = @{
+            displayName = $ModelName
+            description = "Semantic model deployed from PBIP: $ModelName"
+            definition = @{ parts = $smParts }
+        } | ConvertTo-Json -Depth 50
         
         $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
         
