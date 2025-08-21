@@ -173,6 +173,42 @@ function Verify-WorkspaceAccess {
     }
 }
 
+function Wait-FabricOperationCompletion {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$OperationStatusUrl,
+        [Parameter(Mandatory=$true)]
+        [string]$AccessToken,
+        [int]$MaxWaitSeconds = 180
+    )
+
+    $headers = @{
+        "Authorization" = "Bearer $AccessToken"
+        "Content-Type" = "application/json"
+    }
+
+    $elapsed = 0
+    $interval = 5
+    while ($elapsed -lt $MaxWaitSeconds) {
+        try {
+            $resp = Invoke-RestMethod -Uri $OperationStatusUrl -Method Get -Headers $headers -ErrorAction Stop
+            $status = $resp.status
+            if (-not $status) { $status = $resp.state }
+            if ($status -and ($status -in @('Succeeded','Completed'))) { return $true }
+            if ($status -and ($status -in @('Failed','Error'))) {
+                Write-Error "Fabric operation failed: $($resp | ConvertTo-Json -Depth 10)"
+                return $false
+            }
+        } catch {
+            Write-Warning "Failed to poll operation status: $($_.Exception.Message)"
+        }
+        Start-Sleep -Seconds $interval
+        $elapsed += $interval
+    }
+    Write-Warning "Operation did not complete within $MaxWaitSeconds seconds"
+    return $false
+}
+
 function List-WorkspaceItems {
     param(
         [Parameter(Mandatory=$true)]
