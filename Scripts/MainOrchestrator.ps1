@@ -465,28 +465,28 @@ function Deploy-SemanticModel {
 
         $modelDefinition = $modelJson | ConvertTo-Json -Depth 100
         
-        # Build parts for semantic model (include all files under the SemanticModel folder)
+        # Build parts for semantic model (typed endpoint expects top-level paths)
         $smParts = @()
         $smDir = Split-Path $modelBimFile.FullName -Parent
-        $allSmFiles = Get-ChildItem -Path $smDir -Recurse -File
-        foreach ($file in $allSmFiles) {
-            $relativePath = ($file.FullName.Substring($smDir.Length) -replace '^[\\/]+','')
-            $relativePath = $relativePath -replace '\\','/'
-            if ([System.String]::Equals([System.IO.Path]::GetFileName($file.FullName), 'model.bim', [System.StringComparison]::OrdinalIgnoreCase)) {
-                # Use the in-memory modified model definition
-                $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($modelDefinition)
-            } else {
-                $payloadBytes = [System.IO.File]::ReadAllBytes($file.FullName)
+        # model.bim from in-memory updated JSON
+        $smParts += @{
+            path = 'model.bim'
+            payload = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($modelDefinition))
+            payloadType = 'InlineBase64'
+        }
+        foreach ($optional in @('diagramLayout.json','definition.pbism')) {
+            $optPath = Join-Path $smDir $optional
+            if (Test-Path $optPath) {
+                $bytes = [System.IO.File]::ReadAllBytes($optPath)
+                $smParts += @{ path = $optional; payload = [Convert]::ToBase64String($bytes); payloadType = 'InlineBase64' }
             }
-            $b64 = [Convert]::ToBase64String($payloadBytes)
-            $smParts += @{ path = $relativePath; payload = $b64; payloadType = 'InlineBase64' }
         }
 
-        $itemsCreatePayload = @{
+        $deploymentPayload = @{
             displayName = $ModelName
-            type = 'SemanticModel'
-            definition = @{ format = 'PBISM'; parts = $smParts }
-        } | ConvertTo-Json -Depth 100
+            description = "Semantic model deployed from PBIP: $ModelName"
+            definition = @{ parts = $smParts }
+        } | ConvertTo-Json -Depth 50
         
         $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
         
@@ -496,9 +496,8 @@ function Deploy-SemanticModel {
         }
         
         try {
-            # Create via Items API first to ensure PBISM format is respected
-            $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-            $createResp = Invoke-WebRequest -Uri $createUrl -Method Post -Body $itemsCreatePayload -Headers $headers
+            # Create via dedicated semanticModels endpoint and handle async operation
+            $createResp = Invoke-WebRequest -Uri $deployUrl -Method Post -Body $deploymentPayload -Headers $headers -ContentType 'application/json'
             $modelId = $null
             $content = $null
             try { $content = $createResp.Content | ConvertFrom-Json } catch {}
