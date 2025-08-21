@@ -634,20 +634,18 @@ function Deploy-Report {
             throw "report.json file not found in report folder"
         }
 
-        # Build complete parts list from the report folder (include StaticResources and others)
+        # Build parts lists: minimal (typed endpoint) and full (items API)
         $allFiles = Get-ChildItem -Path $ReportFolder -Recurse -File
-        $parts = @()
+        $partsFull = @()
         foreach ($file in $allFiles) {
             $relativePath = ($file.FullName.Substring($ReportFolder.Length) -replace '^[\\/]+','')
             $relativePath = $relativePath -replace '\\','/'
             $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
             $b64 = [Convert]::ToBase64String($bytes)
-            $parts += @{
-                path = $relativePath
-                payload = $b64
-                payloadType = 'InlineBase64'
-            }
+            $partsFull += @{ path = $relativePath; payload = $b64; payloadType = 'InlineBase64' }
         }
+        $reportJsonPart = $partsFull | Where-Object { $_.path -eq 'report.json' } | Select-Object -First 1
+        if (-not $reportJsonPart) { throw 'report.json part not found when building report payload' }
 
         # Resolve or add semantic model binding
         if (-not $SemanticModelId) {
@@ -663,38 +661,14 @@ function Deploy-Report {
         }
         Write-Host "Binding report to semantic model ID: $SemanticModelId"
 
-        $payloadObj = @{
-            displayName = $ReportName
-            type = 'Report'
-            definition = @{ format = 'PBIP'; parts = $parts }
-            datasetId = $SemanticModelId
-        }
-        
-        $deploymentPayloadJson = $payloadObj | ConvertTo-Json -Depth 50
-        
+        # Prepare typed reports payload with minimal parts
         $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
-        
-        $headers = @{ 
-            "Authorization" = "Bearer $AccessToken"
-            "Content-Type" = "application/json"
-        }
+        $headers = @{ "Authorization" = "Bearer $AccessToken"; "Content-Type" = "application/json" }
+        $typedPayloadJson = @{ displayName = $ReportName; definition = @{ parts = @($reportJsonPart) }; datasetId = $SemanticModelId } | ConvertTo-Json -Depth 50
         
         try {
-            if (-not $SemanticModelId) {
-                # Try to resolve dataset id by name
-                Write-Warning "SemanticModelId not provided; resolving by report/semantic model name..."
-                $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
-                $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
-                $existingModel = $listResponse.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
-                if ($existingModel) { $SemanticModelId = $existingModel.id }
-            }
-            if (-not $SemanticModelId) {
-                throw "Dataset (SemanticModel) id is missing and could not be resolved."
-            }
-
-            # Prefer Items API for PBIP report creation
-            $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-            $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $deploymentPayloadJson -Headers $headers
+            # Prefer typed reports endpoint for creation
+            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $typedPayloadJson -Headers $headers
             Write-Host "✓ Report deployed successfully"
             Write-Host "Report ID: $($response.id)"
             return $true
@@ -719,12 +693,10 @@ function Deploy-Report {
                     if ($existingReport) {
                         Write-Host "Found existing report with ID: $($existingReport.id)"
                         
-                        # Try to update the existing report using updateDefinition endpoint
+                        # Try to update the existing report using updateDefinition endpoint (minimal part)
                         $updateUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports/$($existingReport.id)/updateDefinition"
                         
-                        $updatePayload = @{
-                            definition = @{ parts = $parts }
-                        } | ConvertTo-Json -Depth 50
+                        $updatePayload = @{ definition = @{ parts = @($reportJsonPart) } } | ConvertTo-Json -Depth 50
                         
                         try {
                             $updateResponse = Invoke-RestMethod -Uri $updateUrl -Method Post -Body $updatePayload -Headers $headers
@@ -746,14 +718,14 @@ function Deploy-Report {
                 }
             } else {
                 Write-Error "Report creation failed. Status: $statusCode Body: $errBody"
-                # Fallback: Try Items API create explicitly if dedicated endpoint failed for non-409
+                # Fallback: Items API create explicitly with PBIR and full parts
                 try {
                     $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
 
                     $payloadObj = @{
                         displayName = $ReportName
                         type = 'Report'
-                        definition = @{ format = 'PBIP'; parts = $parts }
+                        definition = @{ format = 'PBIR'; parts = $partsFull }
                         datasetId = $SemanticModelId
                     }
 
