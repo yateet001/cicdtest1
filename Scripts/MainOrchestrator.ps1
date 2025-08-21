@@ -649,7 +649,7 @@ function Deploy-Report {
         
         # Add semantic model binding if provided
         if ($SemanticModelId) {
-            $deploymentPayload["datasetId"] = $SemanticModelId
+            $itemsReportPayload["datasetId"] = $SemanticModelId
             Write-Host "Binding report to semantic model ID: $SemanticModelId"
         }
         
@@ -677,7 +677,7 @@ function Deploy-Report {
 
             # Prefer Items API for PBIP report creation
             $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-            $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $deploymentPayloadJson -Headers $headers
+            $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $deploymentPayloadJson -Headers $headers -ContentType 'application/json'
             Write-Host "✓ Report deployed successfully"
             Write-Host "Report ID: $($response.id)"
             return $true
@@ -704,21 +704,17 @@ function Deploy-Report {
                         
                         # Try to update the existing report using updateDefinition endpoint
                         $updateUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports/$($existingReport.id)/updateDefinition"
-                        
+
+                        # Reuse full PBIR parts and include format for update
                         $updatePayload = @{
-                            "definition" = @{
-                                "parts" = @(
-                                    @{
-                                        "path" = "report.json"
-                                        "payload" = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($reportDefinition))
-                                        "payloadType" = "InlineBase64"
-                                    }
-                                )
+                            definition = @{
+                                format = 'PBIR'
+                                parts  = $parts
                             }
-                        } | ConvertTo-Json -Depth 10
-                        
+                        } | ConvertTo-Json -Depth 50
+
                         try {
-                            $updateResponse = Invoke-RestMethod -Uri $updateUrl -Method Post -Body $updatePayload -Headers $headers
+                            $updateResponse = Invoke-RestMethod -Uri $updateUrl -Method Post -Body $updatePayload -Headers $headers -ContentType 'application/json'
                             Write-Host "✓ Report updated successfully"
                             return $true
                         } catch {
@@ -743,7 +739,7 @@ function Deploy-Report {
                     $payloadObj = $itemsReportPayload.PSObject.Copy()
                     if ($SemanticModelId) { $payloadObj["datasetId"] = $SemanticModelId }
                     $payload = $payloadObj | ConvertTo-Json -Depth 50
-                    $response2 = Invoke-RestMethod -Uri $createUrl -Method Post -Body $payload -Headers $headers
+                    $response2 = Invoke-RestMethod -Uri $createUrl -Method Post -Body $payload -Headers $headers -ContentType 'application/json'
                     Write-Host "✓ Report deployed via Items API"
                     return $true
                 } catch {
