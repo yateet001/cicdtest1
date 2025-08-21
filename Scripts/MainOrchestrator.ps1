@@ -364,27 +364,18 @@ function Verify-DeploymentResult {
             "Content-Type" = "application/json"
         }
         
-        # Prefer dedicated endpoints to avoid eventual consistency issues on /items
-        $semanticModel = $null
-        $report = $null
-        try {
-            $smUri = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
-            $smResp = Invoke-RestMethod -Uri $smUri -Method Get -Headers $headers
-            $semanticModel = $smResp.value | Where-Object { $_.displayName -eq $SemanticModelName } | Select-Object -First 1
-        } catch { Write-Warning "Failed to query semanticModels endpoint: $_" }
-        try {
-            $rpUri = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
-            $rpResp = Invoke-RestMethod -Uri $rpUri -Method Get -Headers $headers
-            $report = $rpResp.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
-        } catch { Write-Warning "Failed to query reports endpoint: $_" }
-        if (-not $semanticModel -or -not $report) {
-            # Fallback to aggregated items
-            try {
-                $uri = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-                $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
-                if (-not $semanticModel) { $semanticModel = $response.value | Where-Object { $_.displayName -eq $SemanticModelName -and $_.type -eq "SemanticModel" } | Select-Object -First 1 }
-                if (-not $report) { $report = $response.value | Where-Object { $_.displayName -eq $ReportName -and $_.type -eq "Report" } | Select-Object -First 1 }
-            } catch { Write-Warning "Failed to query aggregated items endpoint: $_" }
+        # Get all workspace items
+        $uri = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
+        $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
+        
+        # Check for semantic model
+        $semanticModel = $response.value | Where-Object { 
+            $_.displayName -eq $SemanticModelName -and $_.type -eq "SemanticModel" 
+        }
+        
+        # Check for report
+        $report = $response.value | Where-Object { 
+            $_.displayName -eq $ReportName -and $_.type -eq "Report" 
         }
         
         return @{
@@ -496,24 +487,6 @@ function Deploy-SemanticModel {
             description = "Semantic model deployed from PBIP: $ModelName"
             definition = @{ parts = $smParts }
         } | ConvertTo-Json -Depth 50
-
-        # If a model with the same name already exists, update it and return success
-        try {
-            $headers = @{ 
-                "Authorization" = "Bearer $AccessToken"
-                "Content-Type" = "application/json"
-            }
-            $existingListUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
-            $existingList = Invoke-RestMethod -Uri $existingListUrl -Method Get -Headers $headers
-            $existingModel = $existingList.value | Where-Object { $_.displayName -eq $ModelName } | Select-Object -First 1
-            if ($existingModel) {
-                Write-Host "Semantic model already exists. Updating definition..."
-                $updateUrlPre = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels/$($existingModel.id)/updateDefinition"
-                $updatePayloadPre = @{ definition = @{ parts = $smParts } } | ConvertTo-Json -Depth 50
-                try { Invoke-RestMethod -Uri $updateUrlPre -Method Post -Body $updatePayloadPre -Headers $headers } catch { Write-Warning "Update definition failed (continuing): $_" }
-                return @{ Success = $true; ModelId = $existingModel.id }
-            }
-        } catch { Write-Warning "Pre-check for existing semantic model failed: $_" }
         
         $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
         
@@ -560,14 +533,14 @@ function Deploy-SemanticModel {
                 $errBody = $reader.ReadToEnd()
             } catch {}
             
-            if ($statusCode -eq 409 -or ($statusCode -eq $null -and ($errBody -eq $null -or $errBody -eq ''))) {
+            if ($statusCode -eq 409) {
                 Write-Host "Semantic model already exists, attempting to find existing model..."
                 
                 # Get existing semantic models to find the ID
                 try {
                     $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
                     $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
-                    $existingModel = $listResponse.value | Where-Object { $_.displayName -eq $ModelName } | Select-Object -First 1
+                    $existingModel = $listResponse.value | Where-Object { $_.displayName -eq $ModelName }
                     
                     if ($existingModel) {
                         Write-Host "Found existing model with ID: $($existingModel.id)"
@@ -575,7 +548,17 @@ function Deploy-SemanticModel {
                         # Try to update the existing model using updateDefinition endpoint
                         $updateUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels/$($existingModel.id)/updateDefinition"
                         
-                        $updatePayload = @{ definition = @{ parts = $smParts } } | ConvertTo-Json -Depth 50
+                        $updatePayload = @{
+                            "definition" = @{
+                                "parts" = @(
+                                    @{
+                                        "path" = "model.bim"
+                                        "payload" = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($modelDefinition))
+                                        "payloadType" = "InlineBase64"
+                                    }
+                                )
+                            }
+                        } | ConvertTo-Json -Depth 10
                         
                         try {
                             $updateResponse = Invoke-RestMethod -Uri $updateUrl -Method Post -Body $updatePayload -Headers $headers
@@ -643,53 +626,58 @@ function Deploy-Report {
             throw "report.json file not found in report folder"
         }
 
-        # Build parts lists: minimal (typed endpoint) and full (items API)
+        # Build complete parts list from the report folder (include StaticResources and others)
         $allFiles = Get-ChildItem -Path $ReportFolder -Recurse -File
-        $partsFull = @()
+        $parts = @()
         foreach ($file in $allFiles) {
             $relativePath = ($file.FullName.Substring($ReportFolder.Length) -replace '^[\\/]+','')
             $relativePath = $relativePath -replace '\\','/'
             $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
             $b64 = [Convert]::ToBase64String($bytes)
-            $partsFull += @{ path = $relativePath; payload = $b64; payloadType = 'InlineBase64' }
-        }
-        $reportJsonPart = $partsFull | Where-Object { $_.path -eq 'report.json' } | Select-Object -First 1
-        if (-not $reportJsonPart) { throw 'report.json part not found when building report payload' }
-
-        # Resolve or add semantic model binding
-        if (-not $SemanticModelId) {
-            # Try to resolve dataset id by name
-            Write-Warning "SemanticModelId not provided; resolving by report/semantic model name..."
-            $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
-            $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
-            $existingModel = $listResponse.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
-            if ($existingModel) { $SemanticModelId = $existingModel.id }
-        }
-        if (-not $SemanticModelId) {
-            throw "Dataset (SemanticModel) id is missing and could not be resolved."
-        }
-        Write-Host "Binding report to semantic model ID: $SemanticModelId"
-
-        # Prepare typed reports payload with minimal parts
-        $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
-        $headers = @{ "Authorization" = "Bearer $AccessToken"; "Content-Type" = "application/json" }
-        $typedPayloadJson = @{ displayName = $ReportName; definition = @{ parts = @($reportJsonPart) }; datasetId = $SemanticModelId } | ConvertTo-Json -Depth 50
-        
-        # Guard: if a report with the same name exists and points to a different semantic model, delete and recreate
-        try {
-            $listUrlPre = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
-            $listRespPre = Invoke-RestMethod -Uri $listUrlPre -Method Get -Headers $headers
-            $conflict = $listRespPre.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
-            if ($conflict -and $conflict.datasetId -and ($conflict.datasetId -ne $SemanticModelId)) {
-                Write-Warning "Existing report with same name bound to different semantic model. Deleting for clean redeploy..."
-                $delUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports/$($conflict.id)"
-                try { Invoke-RestMethod -Uri $delUrl -Method Delete -Headers $headers } catch { Write-Warning "Failed to delete conflicting report: $_" }
+            $parts += @{
+                path = $relativePath
+                payload = $b64
+                payloadType = 'InlineBase64'
             }
-        } catch { Write-Warning "Pre-check for existing report failed: $_" }
+        }
+
+        $itemsReportPayload = @{
+            displayName = $ReportName
+            type = 'Report'
+            definition = @{ format = 'PBIR'; parts = $parts }
+        }
+        
+        # Add semantic model binding if provided
+        if ($SemanticModelId) {
+            $deploymentPayload["datasetId"] = $SemanticModelId
+            Write-Host "Binding report to semantic model ID: $SemanticModelId"
+        }
+        
+        $deploymentPayloadJson = $itemsReportPayload | ConvertTo-Json -Depth 50
+        
+        $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
+        
+        $headers = @{ 
+            "Authorization" = "Bearer $AccessToken"
+            "Content-Type" = "application/json"
+        }
         
         try {
-            # Prefer typed reports endpoint for creation
-            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $typedPayloadJson -Headers $headers
+            if (-not $SemanticModelId) {
+                # Try to resolve dataset id by name
+                Write-Warning "SemanticModelId not provided; resolving by report/semantic model name..."
+                $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
+                $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
+                $existingModel = $listResponse.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
+                if ($existingModel) { $SemanticModelId = $existingModel.id }
+            }
+            if (-not $SemanticModelId) {
+                throw "Dataset (SemanticModel) id is missing and could not be resolved."
+            }
+
+            # Prefer Items API for PBIP report creation
+            $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
+            $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $deploymentPayloadJson -Headers $headers
             Write-Host "✓ Report deployed successfully"
             Write-Host "Report ID: $($response.id)"
             return $true
@@ -709,15 +697,25 @@ function Deploy-Report {
                 try {
                     $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
                     $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
-                    $existingReport = $listResponse.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
+                    $existingReport = $listResponse.value | Where-Object { $_.displayName -eq $ReportName }
                     
                     if ($existingReport) {
                         Write-Host "Found existing report with ID: $($existingReport.id)"
                         
-                        # Try to update the existing report using updateDefinition endpoint (minimal part)
+                        # Try to update the existing report using updateDefinition endpoint
                         $updateUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports/$($existingReport.id)/updateDefinition"
                         
-                        $updatePayload = @{ definition = @{ parts = @($reportJsonPart) } } | ConvertTo-Json -Depth 50
+                        $updatePayload = @{
+                            "definition" = @{
+                                "parts" = @(
+                                    @{
+                                        "path" = "report.json"
+                                        "payload" = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($reportDefinition))
+                                        "payloadType" = "InlineBase64"
+                                    }
+                                )
+                            }
+                        } | ConvertTo-Json -Depth 10
                         
                         try {
                             $updateResponse = Invoke-RestMethod -Uri $updateUrl -Method Post -Body $updatePayload -Headers $headers
@@ -739,28 +737,18 @@ function Deploy-Report {
                 }
             } else {
                 Write-Error "Report creation failed. Status: $statusCode Body: $errBody"
-                # Fallback: Items API create explicitly with PBIR and full parts
+                # Fallback: Try Items API create explicitly if dedicated endpoint failed for non-409
                 try {
                     $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-
-                    $payloadObj = @{
-                        displayName = $ReportName
-                        type = 'Report'
-                        definition = @{ format = 'PBIR'; parts = $partsFull }
-                        datasetId = $SemanticModelId
-                    }
-
+                    $payloadObj = $itemsReportPayload.PSObject.Copy()
+                    if ($SemanticModelId) { $payloadObj["datasetId"] = $SemanticModelId }
                     $payload = $payloadObj | ConvertTo-Json -Depth 50
                     $response2 = Invoke-RestMethod -Uri $createUrl -Method Post -Body $payload -Headers $headers
                     Write-Host "✓ Report deployed via Items API"
                     return $true
                 } catch {
-                    $statusCode2 = $null
-                    $errBody2 = $null
-                    try { $statusCode2 = $_.Exception.Response.StatusCode } catch {}
-                    try { $reader2 = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream()); $errBody2 = $reader2.ReadToEnd() } catch {}
-                    Write-Error "Report creation fallback failed. Status: $statusCode2 Body: $errBody2"
-                    return $false
+                    Write-Error "Report creation failed. Status: $statusCode Body: $errBody"
+                    throw $_
                 }
             }
         }
