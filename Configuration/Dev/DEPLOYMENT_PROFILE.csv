@@ -1,0 +1,3 @@
+workspace_name,report_name,report_path,warehouse_name,environment_type,transformation_layer
+DevWorkspace1,Demo Report,Demo Report/Demo Report.pbip,WH_Sales,Reporting,Reporting
+DevWorkspace1,Demo Report,Demo Report/Demo Report.pbip,WH_Sales,Operations,Operations

@@ -1,0 +1,60 @@
+{
+  "config": "{\"version\":\"5.59\",\"themeCollection\":{\"baseTheme\":{\"name\":\"CY24SU10\",\"version\":\"5.61\",\"type\":2}},\"activeSectionIndex\":0,\"defaultDrillFilterOtherVisuals\":true,\"linguisticSchemaSyncVersion\":2,\"settings\":{\"useNewFilterPaneExperience\":true,\"allowChangeFilterTypes\":true,\"useStylableVisualContainerHeader\":true,\"queryLimitOption\":6,\"exportDataMode\":1,\"useDefaultAggregateDisplayName\":true,\"useEnhancedTooltips\":true,\"pauseQueries\":false},\"objects\":{\"section\":[{\"properties\":{\"verticalAlignment\":{\"expr\":{\"Literal\":{\"Value\":\"'Top'\"}}}}}]}}",
+  "layoutOptimization": 0,
+  "resourcePackages": [
+    {
+      "resourcePackage": {
+        "disabled": false,
+        "items": [
+          {
+            "name": "CY24SU10",
+            "path": "BaseThemes/CY24SU10.json",
+            "type": 202
+          }
+        ],
+        "name": "SharedResources",
+        "type": 2
+      }
+    }
+  ],
+  "sections": [
+    {
+      "config": "{}",
+      "displayName": "Page 1",
+      "displayOption": 1,
+      "filters": "[]",
+      "height": 720.00,
+      "name": "4d8f8f50c9155c6e30c0",
+      "visualContainers": [
+        {
+          "config": "{\"name\":\"79274ac5927078240490\",\"layouts\":[{\"id\":0,\"position\":{\"x\":599.0597245611202,\"y\":49.13423608387737,\"z\":1000,\"width\":491.34236083877374,\"height\":338.27031765438653,\"tabOrder\":1000}}],\"singleVisual\":{\"visualType\":\"pieChart\",\"projections\":{\"Category\":[{\"queryRef\":\"Dataset1 1.Area\",\"active\":true}],\"Y\":[{\"queryRef\":\"Sum(Dataset1 1.Total Sales)\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"d\",\"Entity\":\"Dataset1 1\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"d\"}},\"Property\":\"Area\"},\"Name\":\"Dataset1 1.Area\",\"NativeReferenceName\":\"Area\"},{\"Aggregation\":{\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"d\"}},\"Property\":\"Total Sales\"}},\"Function\":0},\"Name\":\"Sum(Dataset1 1.Total Sales)\",\"NativeReferenceName\":\"Sum of Total Sales\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Aggregation\":{\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"d\"}},\"Property\":\"Total Sales\"}},\"Function\":0}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true}}",
+          "filters": "[]",
+          "height": 338.27,
+          "width": 491.34,
+          "x": 599.06,
+          "y": 49.13,
+          "z": 1000.00
+        },
+        {
+          "config": "{\"name\":\"7db3e3cbad6870e506b4\",\"layouts\":[{\"id\":0,\"position\":{\"x\":52.913792705714094,\"y\":49.13423608387737,\"z\":0,\"width\":455.43657293132486,\"height\":532.9174836789776,\"tabOrder\":0}}],\"singleVisual\":{\"visualType\":\"tableEx\",\"projections\":{\"Values\":[{\"queryRef\":\"Sum(Dataset1 1.Total Sales)\"},{\"queryRef\":\"Dataset1 1.Customer\"},{\"queryRef\":\"Sum(Dataset1 1.Quantity)\"},{\"queryRef\":\"Dataset1 1.Area\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"d\",\"Entity\":\"Dataset1 1\",\"Type\":0}],\"Select\":[{\"Aggregation\":{\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"d\"}},\"Property\":\"Total Sales\"}},\"Function\":0},\"Name\":\"Sum(Dataset1 1.Total Sales)\",\"NativeReferenceName\":\"Sum of Total Sales\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"d\"}},\"Property\":\"Customer\"},\"Name\":\"Dataset1 1.Customer\",\"NativeReferenceName\":\"Customer\"},{\"Aggregation\":{\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"d\"}},\"Property\":\"Quantity\"}},\"Function\":0},\"Name\":\"Sum(Dataset1 1.Quantity)\",\"NativeReferenceName\":\"Sum of Quantity\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"d\"}},\"Property\":\"Area\"},\"Name\":\"Dataset1 1.Area\",\"NativeReferenceName\":\"Area\"}]},\"drillFilterOtherVisuals\":true}}",
+          "filters": "[]",
+          "height": 532.92,
+          "width": 455.44,
+          "x": 52.91,
+          "y": 49.13,
+          "z": 0.00
+        },
+        {
+          "config": "{\"name\":\"e98e5a8d3eb1e415a4a0\",\"layouts\":[{\"id\":0,\"position\":{\"x\":599.0597245611202,\"y\":387.40455373826387,\"z\":2000,\"width\":614.1779510484671,\"height\":283.46674663775406,\"tabOrder\":2000}}],\"singleVisual\":{\"visualType\":\"stackedAreaChart\",\"projections\":{\"Category\":[{\"queryRef\":\"Dataset1 1.Product\",\"active\":true}],\"Y\":[{\"queryRef\":\"Sum(Dataset1 1.Price)\"},{\"queryRef\":\"Sum(Dataset1 1.Total Sales)\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"d\",\"Entity\":\"Dataset1 1\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"d\"}},\"Property\":\"Product\"},\"Name\":\"Dataset1 1.Product\",\"NativeReferenceName\":\"Product\"},{\"Aggregation\":{\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"d\"}},\"Property\":\"Price\"}},\"Function\":0},\"Name\":\"Sum(Dataset1 1.Price)\",\"NativeReferenceName\":\"Sum of Price\"},{\"Aggregation\":{\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"d\"}},\"Property\":\"Total Sales\"}},\"Function\":0},\"Name\":\"Sum(Dataset1 1.Total Sales)\",\"NativeReferenceName\":\"Sum of Total Sales\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Aggregation\":{\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"d\"}},\"Property\":\"Price\"}},\"Function\":0}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true}}",
+          "filters": "[]",
+          "height": 283.47,
+          "width": 614.18,
+          "x": 599.06,
+          "y": 387.40,
+          "z": 2000.00
+        }
+      ],
+      "width": 1280.00
+    }
+  ]
+}

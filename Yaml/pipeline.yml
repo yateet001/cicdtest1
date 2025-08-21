@@ -1,0 +1,110 @@
+trigger: none
+
+pool:
+  vmImage: 'windows-latest'  # Use a Windows-based agent to support PowerShell and Power BI Desktop
+
+variables:
+  artifact_path: '$(Build.ArtifactStagingDirectory)'  # Directory for downloaded artifacts
+  config_file: 'Config/config.json'  # Path to config file containing credentials and settings
+  deployment_profile_dev: 'Configuration/Deployement_profile_dev.csv'  # Deployment profile for Dev environment
+  deployment_profile_prod: 'Configuration/Deployement_profile_prod.csv'  # Deployment profile for Prod environment
+  output_folder: 'OutputLogs'  # Folder for output logs
+
+parameters:
+  - name: Deployment_Environment
+    displayName: "Deployment Environment"
+    type: string
+    default: "DEV"
+    values:
+      - "DEV"
+      - "PROD"
+
+  - name: Environment_Type
+    displayName: "Environment Type"
+    type: string
+    default: "Primary"
+    values:
+      - "Primary"
+      - "Secondary"
+
+  - name: Run_Operations
+    displayName: "Deploy Operations Dashboard"
+    type: boolean
+    default: true
+
+  - name: Run_Semantic_Model
+    displayName: "Deploy Semantic Models"
+    type: boolean
+    default: true
+
+stages:
+  # Approval Stage
+  - stage: Approval_Stage
+    jobs:
+      - deployment: Approval
+        environment: UDP-${{ parameters.Deployment_Environment }}-Deploy
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - script: |
+                    echo "Approval Stage: All good to proceed"
+
+  # Deployment Stage (PBIP Report Deployment)
+  - stage: DeployPBIPToWorkspace
+    displayName: "Deploy Power BI PBIP Reports"
+    jobs:
+      - job: DeployPowerBIReports
+        displayName: "Deploy PBIP Reports"
+        timeoutInMinutes: 360
+        pool:
+          vmImage: 'windows-latest'
+        steps:
+        
+          # Step 1: Install .NET SDK
+          - task: UseDotNet@2
+            displayName: 'Install .NET SDK'
+            inputs:
+              packageType: 'sdk'
+              version: '6.x'
+
+          # Step 2: Install Power BI Desktop
+          - task: PowerShell@2
+            displayName: 'Install Power BI Desktop'
+            inputs:
+              targetType: inline
+              script: |
+                $msiUrl = "https://go.microsoft.com/fwlink/?linkid=2216531"
+                $msiPath = "$(Build.ArtifactStagingDirectory)\PBIDesktopInstaller.msi"
+                Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath
+                Start-Process msiexec.exe -Wait -ArgumentList "/i `"$msiPath`" /quiet /norestart"
+
+          # Step 3: Create Output Directory
+          - task: PowerShell@2
+            displayName: 'Create Output Directory'
+            inputs:
+              targetType: inline
+              script: |
+                $outputPath = "$(Build.SourcesDirectory)/$(output_folder)"
+                if (!(Test-Path $outputPath)) {
+                    New-Item -Path $outputPath -ItemType Directory -Force
+                }
+                Write-Host "Output directory created: $outputPath"
+
+          # Step 4: Run Main PBIP Deployment Script
+          - task: PowerShell@2
+            displayName: "Deploy PBIP Reports to Power BI"
+            inputs:
+              filePath: 'Scripts/MainOrchestrator.ps1'
+              arguments: '-Workspace "${{ parameters.Deployment_Environment }}" -ConfigFile "$(config_file)"'
+              pwsh: true
+              workingDirectory: '$(Build.SourcesDirectory)'
+
+          # Step 5: Publish deployment logs as artifacts (if they exist)
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Deployment Logs'
+            condition: always()
+            inputs:
+              PathtoPublish: '$(Build.SourcesDirectory)/$(output_folder)'
+              ArtifactName: 'PowerBI-Deployment-Logs'
+              publishLocation: 'Container'
