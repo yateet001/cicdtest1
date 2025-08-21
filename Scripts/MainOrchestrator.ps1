@@ -579,27 +579,29 @@ function Deploy-Report {
         Write-Host "Deploying report: $ReportName"
         
         $reportJsonFile = Join-Path $ReportFolder "report.json"
-        
         if (-not (Test-Path $reportJsonFile)) {
             throw "report.json file not found in report folder"
         }
-        
-        $reportDefinition = Get-Content $reportJsonFile -Raw
-        Write-Host "Report definition loaded: $($reportDefinition.Length) characters"
-        
-        # Updated payload structure for Fabric API reports
-        $deploymentPayload = @{
-            "displayName" = $ReportName
-            "description" = "Report deployed from PBIP: $ReportName"
-            "definition" = @{
-                "parts" = @(
-                    @{
-                        "path" = "report.json"
-                        "payload" = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($reportDefinition))
-                        "payloadType" = "InlineBase64"
-                    }
-                )
+
+        # Build complete parts list from the report folder (include StaticResources and others)
+        $allFiles = Get-ChildItem -Path $ReportFolder -Recurse -File
+        $parts = @()
+        foreach ($file in $allFiles) {
+            $relativePath = ($file.FullName.Substring($ReportFolder.Length)).TrimStart('\\','/')
+            $relativePath = $relativePath -replace '\\','/'
+            $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+            $b64 = [Convert]::ToBase64String($bytes)
+            $parts += @{
+                path = $relativePath
+                payload = $b64
+                payloadType = 'InlineBase64'
             }
+        }
+
+        $deploymentPayload = @{
+            displayName = $ReportName
+            description = "Report deployed from PBIP: $ReportName"
+            definition = @{ parts = $parts }
         }
         
         # Add semantic model binding if provided
@@ -608,7 +610,7 @@ function Deploy-Report {
             Write-Host "Binding report to semantic model ID: $SemanticModelId"
         }
         
-        $deploymentPayloadJson = $deploymentPayload | ConvertTo-Json -Depth 10
+        $deploymentPayloadJson = $deploymentPayload | ConvertTo-Json -Depth 50
         
         $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
         
