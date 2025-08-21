@@ -358,7 +358,11 @@ function Deploy-SemanticModel {
         [Parameter(Mandatory=$true)]
         [string]$AccessToken,
         [Parameter(Mandatory=$true)]
-        [string]$ModelName
+        [string]$ModelName,
+        [Parameter(Mandatory=$true)]
+        [string]$ServerName,
+        [Parameter(Mandatory=$true)]
+        [string]$DatabaseName
     )
     
     try {
@@ -369,9 +373,50 @@ function Deploy-SemanticModel {
         if (-not $modelBimFile) {
             throw "model.bim file not found in semantic model folder"
         }
-        
-        $modelDefinition = Get-Content $modelBimFile.FullName -Raw
-        Write-Host "Model definition loaded: $($modelDefinition.Length) characters"
+
+        # Load and update the model definition for connection switching
+        $modelDefinitionRaw = Get-Content $modelBimFile.FullName -Raw
+        Write-Host "Model definition loaded: $($modelDefinitionRaw.Length) characters"
+
+        try {
+            $modelJson = $modelDefinitionRaw | ConvertFrom-Json
+        } catch {
+            throw "Failed to parse model.bim JSON: $_"
+        }
+
+        $updatesApplied = 0
+        if ($modelJson.model -and $modelJson.model.tables) {
+            foreach ($table in $modelJson.model.tables) {
+                if ($table.partitions) {
+                    foreach ($partition in $table.partitions) {
+                        if ($partition.source -and $partition.source.type -eq 'm' -and $partition.source.expression) {
+                            $pattern = 'Sql\.Database\(".*?"\s*,\s*".*?"\)'
+                            $replacement = 'Sql.Database("' + $ServerName + '", "' + $DatabaseName + '")'
+
+                            if ($partition.source.expression -is [System.Array]) {
+                                $newExpr = @()
+                                foreach ($line in $partition.source.expression) {
+                                    $newExpr += ($line -replace $pattern, $replacement)
+                                }
+                                $partition.source.expression = $newExpr
+                                $updatesApplied++
+                            } elseif ($partition.source.expression -is [string]) {
+                                $partition.source.expression = ($partition.source.expression -replace $pattern, $replacement)
+                                $updatesApplied++
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($updatesApplied -gt 0) {
+            Write-Host "✓ Connection switching applied to $updatesApplied partition(s)"
+        } else {
+            Write-Warning "No Sql.Database() expressions found to update in model.bim"
+        }
+
+        $modelDefinition = $modelJson | ConvertTo-Json -Depth 100
         
         # Updated payload structure for Fabric API semantic models
         $deploymentPayload = @{
@@ -396,7 +441,21 @@ function Deploy-SemanticModel {
         }
         
         try {
-            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayload -Headers $headers
+            # Prefer Fabric Items API for creation
+            $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
+            $createPayload = @{
+                "displayName" = $ModelName
+                "type" = "SemanticModel"
+                "definition" = (@($deploymentPayload | ConvertFrom-Json).definition)
+            } | ConvertTo-Json -Depth 20
+
+            try {
+                $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $createPayload -Headers $headers
+            } catch {
+                Write-Warning "Items API create failed, falling back to semanticModels endpoint: $($_.Exception.Message)"
+                $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayload -Headers $headers
+            }
+
             Write-Host "✓ Semantic model deployed successfully"
             Write-Host "Model ID: $($response.id)"
             return @{
@@ -404,7 +463,13 @@ function Deploy-SemanticModel {
                 ModelId = $response.id
             }
         } catch {
-            $statusCode = $_.Exception.Response.StatusCode
+            $statusCode = $null
+            $errBody = $null
+            try { $statusCode = $_.Exception.Response.StatusCode } catch {}
+            try {
+                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+                $errBody = $reader.ReadToEnd()
+            } catch {}
             
             if ($statusCode -eq 409) {
                 Write-Host "Semantic model already exists, attempting to find existing model..."
@@ -464,6 +529,7 @@ function Deploy-SemanticModel {
                     }
                 }
             } else {
+                Write-Error "Semantic model creation failed. Status: $statusCode Body: $errBody"
                 throw $_
             }
         }
@@ -533,12 +599,33 @@ function Deploy-Report {
         }
         
         try {
-            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayloadJson -Headers $headers
+            # Prefer Fabric Items API for creation
+            $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
+            $createPayload = @{
+                "displayName" = $ReportName
+                "type" = "Report"
+                "definition" = (@($deploymentPayload | ConvertFrom-Json).definition)
+                "datasetId" = $SemanticModelId
+            } | ConvertTo-Json -Depth 20
+
+            try {
+                $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $createPayload -Headers $headers
+            } catch {
+                Write-Warning "Items API create failed, falling back to reports endpoint: $($_.Exception.Message)"
+                $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayloadJson -Headers $headers
+            }
+
             Write-Host "✓ Report deployed successfully"
             Write-Host "Report ID: $($response.id)"
             return $true
         } catch {
-            $statusCode = $_.Exception.Response.StatusCode
+            $statusCode = $null
+            $errBody = $null
+            try { $statusCode = $_.Exception.Response.StatusCode } catch {}
+            try {
+                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+                $errBody = $reader.ReadToEnd()
+            } catch {}
             
             if ($statusCode -eq 409) {
                 Write-Host "Report already exists, attempting to find and update..."
@@ -586,6 +673,7 @@ function Deploy-Report {
                     return $false
                 }
             } else {
+                Write-Error "Report creation failed. Status: $statusCode Body: $errBody"
                 throw $_
             }
         }
@@ -606,7 +694,11 @@ function Deploy-PBIPUsingFabricAPI {
         [string]$WorkspaceId,
         [Parameter(Mandatory=$true)]
         [string]$AccessToken,
-        [string]$Takeover = "True"
+        [string]$Takeover = "True",
+        [Parameter(Mandatory=$true)]
+        [string]$ServerName,
+        [Parameter(Mandatory=$true)]
+        [string]$DatabaseName
     )
     
     try {
@@ -638,7 +730,7 @@ function Deploy-PBIPUsingFabricAPI {
         
         # Step 4: Deploy Semantic Model
         Write-Host "`n--- STEP 4: SEMANTIC MODEL DEPLOYMENT ---"
-        $semanticModelResult = Deploy-SemanticModel -SemanticModelFolder $validation.SemanticModelFolder -WorkspaceId $WorkspaceId -AccessToken $AccessToken -ModelName $ReportName
+        $semanticModelResult = Deploy-SemanticModel -SemanticModelFolder $validation.SemanticModelFolder -WorkspaceId $WorkspaceId -AccessToken $AccessToken -ModelName $ReportName -ServerName $ServerName -DatabaseName $DatabaseName
         
         if (-not $semanticModelResult.Success) {
             throw "Semantic model deployment failed: $($semanticModelResult.Error)"
@@ -752,7 +844,7 @@ try {
         throw "Configuration file not found: $ConfigFile"
     }
 
-    $config = Get-Content $ConfigFile | ConvertFrom-Json
+    $config = Get-Content -Raw $ConfigFile | ConvertFrom-Json
     Write-Host "Configuration loaded successfully"
 
     # Get SPN credentials from config
@@ -771,7 +863,7 @@ try {
             $targetWorkspaceId = $config.DevWorkspaceID
         }
         "PROD" {
-            $targetWorkspaceId = $config.UATWorkspaceID
+            $targetWorkspaceId = $config.ProdWorkspaceID
         }
         default {
             throw "Unsupported environment: $Workspace. Only DEV and PROD are supported."
@@ -786,6 +878,9 @@ try {
 
     # Get Access Token
     $accessToken = Get-SPNToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
+    if (-not $accessToken) {
+        throw "Failed to obtain access token. Check TenantID/ClientID/ClientSecret and app permissions."
+    }
 
     # Set artifact path
     $artifactPath = $env:BUILD_SOURCESDIRECTORY
@@ -829,8 +924,18 @@ try {
         $reportName = [System.IO.Path]::GetFileNameWithoutExtension($pbipFile.Name)
         Write-Host "`nProcessing PBIP: $reportName"
         Write-Host "File path: $($pbipFile.FullName)"
-        
-        $deploymentSuccess = Deploy-PBIPUsingFabricAPI -PBIPFilePath $pbipFile.FullName -ReportName $reportName -WorkspaceId $targetWorkspaceId -AccessToken $accessToken
+
+        # Determine connection settings based on target environment
+        if ($Workspace.ToUpper() -eq 'DEV') {
+            $serverName = $config.DevWarehouseConnection
+            $databaseName = $config.DevWarehouseName
+        } else {
+            $serverName = $config.ProdWarehouseConnection
+            $databaseName = $config.ProdWarehouseName
+        }
+        Write-Host "Using connection -> Server: $serverName | Database: $databaseName"
+
+        $deploymentSuccess = Deploy-PBIPUsingFabricAPI -PBIPFilePath $pbipFile.FullName -ReportName $reportName -WorkspaceId $targetWorkspaceId -AccessToken $accessToken -ServerName $serverName -DatabaseName $databaseName
         
         $result = [PSCustomObject]@{
             ReportName = $reportName
