@@ -649,19 +649,28 @@ function Deploy-Report {
             }
         }
 
-        $itemsReportPayload = @{
+        # Resolve or add semantic model binding
+        if (-not $SemanticModelId) {
+            # Try to resolve dataset id by name
+            Write-Warning "SemanticModelId not provided; resolving by report/semantic model name..."
+            $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
+            $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
+            $existingModel = $listResponse.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
+            if ($existingModel) { $SemanticModelId = $existingModel.id }
+        }
+        if (-not $SemanticModelId) {
+            throw "Dataset (SemanticModel) id is missing and could not be resolved."
+        }
+        Write-Host "Binding report to semantic model ID: $SemanticModelId"
+
+        $payloadObj = @{
             displayName = $ReportName
             type = 'Report'
-            definition = @{ format = 'PBIR'; parts = $parts }
+            definition = @{ format = 'PBIP'; parts = $parts }
+            datasetId = $SemanticModelId
         }
         
-        # Add semantic model binding if provided
-        if ($SemanticModelId) {
-            $deploymentPayload["datasetId"] = $SemanticModelId
-            Write-Host "Binding report to semantic model ID: $SemanticModelId"
-        }
-        
-        $deploymentPayloadJson = $itemsReportPayload | ConvertTo-Json -Depth 50
+        $deploymentPayloadJson = $payloadObj | ConvertTo-Json -Depth 50
         
         $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
         
@@ -740,15 +749,25 @@ function Deploy-Report {
                 # Fallback: Try Items API create explicitly if dedicated endpoint failed for non-409
                 try {
                     $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-                    $payloadObj = $itemsReportPayload.PSObject.Copy()
-                    if ($SemanticModelId) { $payloadObj["datasetId"] = $SemanticModelId }
+
+                    $payloadObj = @{
+                        displayName = $ReportName
+                        type = 'Report'
+                        definition = @{ format = 'PBIP'; parts = $parts }
+                        datasetId = $SemanticModelId
+                    }
+
                     $payload = $payloadObj | ConvertTo-Json -Depth 50
                     $response2 = Invoke-RestMethod -Uri $createUrl -Method Post -Body $payload -Headers $headers
                     Write-Host "✓ Report deployed via Items API"
                     return $true
                 } catch {
-                    Write-Error "Report creation failed. Status: $statusCode Body: $errBody"
-                    throw $_
+                    $statusCode2 = $null
+                    $errBody2 = $null
+                    try { $statusCode2 = $_.Exception.Response.StatusCode } catch {}
+                    try { $reader2 = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream()); $errBody2 = $reader2.ReadToEnd() } catch {}
+                    Write-Error "Report creation fallback failed. Status: $statusCode2 Body: $errBody2"
+                    return $false
                 }
             }
         }
