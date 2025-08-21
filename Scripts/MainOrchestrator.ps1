@@ -441,7 +441,21 @@ function Deploy-SemanticModel {
         }
         
         try {
-            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayload -Headers $headers
+            # Prefer Fabric Items API for creation
+            $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
+            $createPayload = @{
+                "displayName" = $ModelName
+                "type" = "SemanticModel"
+                "definition" = (@($deploymentPayload | ConvertFrom-Json).definition)
+            } | ConvertTo-Json -Depth 20
+
+            try {
+                $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $createPayload -Headers $headers
+            } catch {
+                Write-Warning "Items API create failed, falling back to semanticModels endpoint: $($_.Exception.Message)"
+                $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayload -Headers $headers
+            }
+
             Write-Host "✓ Semantic model deployed successfully"
             Write-Host "Model ID: $($response.id)"
             return @{
@@ -449,7 +463,13 @@ function Deploy-SemanticModel {
                 ModelId = $response.id
             }
         } catch {
-            $statusCode = $_.Exception.Response.StatusCode
+            $statusCode = $null
+            $errBody = $null
+            try { $statusCode = $_.Exception.Response.StatusCode } catch {}
+            try {
+                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+                $errBody = $reader.ReadToEnd()
+            } catch {}
             
             if ($statusCode -eq 409) {
                 Write-Host "Semantic model already exists, attempting to find existing model..."
@@ -509,6 +529,7 @@ function Deploy-SemanticModel {
                     }
                 }
             } else {
+                Write-Error "Semantic model creation failed. Status: $statusCode Body: $errBody"
                 throw $_
             }
         }
@@ -578,12 +599,33 @@ function Deploy-Report {
         }
         
         try {
-            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayloadJson -Headers $headers
+            # Prefer Fabric Items API for creation
+            $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
+            $createPayload = @{
+                "displayName" = $ReportName
+                "type" = "Report"
+                "definition" = (@($deploymentPayload | ConvertFrom-Json).definition)
+                "datasetId" = $SemanticModelId
+            } | ConvertTo-Json -Depth 20
+
+            try {
+                $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $createPayload -Headers $headers
+            } catch {
+                Write-Warning "Items API create failed, falling back to reports endpoint: $($_.Exception.Message)"
+                $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayloadJson -Headers $headers
+            }
+
             Write-Host "✓ Report deployed successfully"
             Write-Host "Report ID: $($response.id)"
             return $true
         } catch {
-            $statusCode = $_.Exception.Response.StatusCode
+            $statusCode = $null
+            $errBody = $null
+            try { $statusCode = $_.Exception.Response.StatusCode } catch {}
+            try {
+                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+                $errBody = $reader.ReadToEnd()
+            } catch {}
             
             if ($statusCode -eq 409) {
                 Write-Host "Report already exists, attempting to find and update..."
@@ -631,6 +673,7 @@ function Deploy-Report {
                     return $false
                 }
             } else {
+                Write-Error "Report creation failed. Status: $statusCode Body: $errBody"
                 throw $_
             }
         }
@@ -835,6 +878,9 @@ try {
 
     # Get Access Token
     $accessToken = Get-SPNToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
+    if (-not $accessToken) {
+        throw "Failed to obtain access token. Check TenantID/ClientID/ClientSecret and app permissions."
+    }
 
     # Set artifact path
     $artifactPath = $env:BUILD_SOURCESDIRECTORY
