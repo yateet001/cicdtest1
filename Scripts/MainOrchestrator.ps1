@@ -275,11 +275,22 @@ function Wait-ForDeploymentCompletion {
                 "Content-Type" = "application/json"
             }
             
-            $uri = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-            $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
+            $item = $null
+            if ($ItemType -eq "SemanticModel") {
+                $uriSm = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
+                $responseSm = Invoke-RestMethod -Uri $uriSm -Method Get -Headers $headers
+                $item = $responseSm.value | Where-Object { $_.displayName -eq $ItemName }
+            } elseif ($ItemType -eq "Report") {
+                $uriRpt = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
+                $responseRpt = Invoke-RestMethod -Uri $uriRpt -Method Get -Headers $headers
+                $item = $responseRpt.value | Where-Object { $_.displayName -eq $ItemName }
+            }
             
-            $item = $response.value | Where-Object { 
-                $_.displayName -eq $ItemName -and $_.type -eq $ItemType 
+            if (-not $item) {
+                # Fallback to aggregated items API
+                $uri = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
+                $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
+                $item = $response.value | Where-Object { $_.displayName -eq $ItemName }
             }
             
             if ($item) {
@@ -418,20 +429,25 @@ function Deploy-SemanticModel {
 
         $modelDefinition = $modelJson | ConvertTo-Json -Depth 100
         
-        # Updated payload structure for Fabric API semantic models
-        $deploymentPayload = @{
-            "displayName" = $ModelName
-            "description" = "Semantic model deployed from PBIP: $ModelName"
-            "definition" = @{
-                "parts" = @(
-                    @{
-                        "path" = "model.bim"
-                        "payload" = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($modelDefinition))
-                        "payloadType" = "InlineBase64"
-                    }
-                )
+        # Build parts for semantic model (include model.bim, diagramLayout.json, definition.pbism if present)
+        $smParts = @()
+        $smDir = Split-Path $modelBimFile.FullName -Parent
+        $filesToInclude = @('model.bim','diagramLayout.json','definition.pbism')
+        foreach ($name in $filesToInclude) {
+            $p = Join-Path $smDir $name
+            if (Test-Path $p) {
+                $bytes = [System.IO.File]::ReadAllBytes($p)
+                $b64 = [Convert]::ToBase64String($bytes)
+                $rel = Split-Path $p -Leaf
+                $smParts += @{ path = $rel; payload = $b64; payloadType = 'InlineBase64' }
             }
-        } | ConvertTo-Json -Depth 10
+        }
+
+        $deploymentPayload = @{
+            displayName = $ModelName
+            description = "Semantic model deployed from PBIP: $ModelName"
+            definition = @{ parts = $smParts }
+        } | ConvertTo-Json -Depth 50
         
         $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
         
@@ -441,26 +457,34 @@ function Deploy-SemanticModel {
         }
         
         try {
-            # Prefer Fabric Items API for creation
-            $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-            $createPayload = @{
-                "displayName" = $ModelName
-                "type" = "SemanticModel"
-                "definition" = (@($deploymentPayload | ConvertFrom-Json).definition)
-            } | ConvertTo-Json -Depth 20
-
-            try {
-                $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $createPayload -Headers $headers
-            } catch {
-                Write-Warning "Items API create failed, falling back to semanticModels endpoint: $($_.Exception.Message)"
-                $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayload -Headers $headers
+            # Prefer dedicated semanticModels endpoint for creation
+            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayload -Headers $headers
+            $modelId = $response.id
+            if (-not $modelId) {
+                Write-Warning "semanticModels endpoint returned no id; trying to resolve by name..."
+                $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
+                $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
+                $existing = $listResponse.value | Where-Object { $_.displayName -eq $ModelName } | Select-Object -First 1
+                if ($existing) { $modelId = $existing.id }
             }
+            if (-not $modelId) {
+                # Final fallback: Items API create
+                $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
+                $createPayload = @{
+                    "displayName" = $ModelName
+                    "type" = "SemanticModel"
+                    "definition" = (@($deploymentPayload | ConvertFrom-Json).definition)
+                } | ConvertTo-Json -Depth 20
+                $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $createPayload -Headers $headers
+                $modelId = $response.id
+            }
+            if (-not $modelId) { throw "Semantic model id could not be determined after creation" }
 
             Write-Host "✓ Semantic model deployed successfully"
-            Write-Host "Model ID: $($response.id)"
+            Write-Host "Model ID: $modelId"
             return @{
                 Success = $true
-                ModelId = $response.id
+                ModelId = $modelId
             }
         } catch {
             $statusCode = $null
@@ -560,27 +584,29 @@ function Deploy-Report {
         Write-Host "Deploying report: $ReportName"
         
         $reportJsonFile = Join-Path $ReportFolder "report.json"
-        
         if (-not (Test-Path $reportJsonFile)) {
             throw "report.json file not found in report folder"
         }
-        
-        $reportDefinition = Get-Content $reportJsonFile -Raw
-        Write-Host "Report definition loaded: $($reportDefinition.Length) characters"
-        
-        # Updated payload structure for Fabric API reports
-        $deploymentPayload = @{
-            "displayName" = $ReportName
-            "description" = "Report deployed from PBIP: $ReportName"
-            "definition" = @{
-                "parts" = @(
-                    @{
-                        "path" = "report.json"
-                        "payload" = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($reportDefinition))
-                        "payloadType" = "InlineBase64"
-                    }
-                )
+
+        # Build complete parts list from the report folder (include StaticResources and others)
+        $allFiles = Get-ChildItem -Path $ReportFolder -Recurse -File
+        $parts = @()
+        foreach ($file in $allFiles) {
+            $relativePath = ($file.FullName.Substring($ReportFolder.Length)).TrimStart('\\','/')
+            $relativePath = $relativePath -replace '\\','/'
+            $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+            $b64 = [Convert]::ToBase64String($bytes)
+            $parts += @{
+                path = $relativePath
+                payload = $b64
+                payloadType = 'InlineBase64'
             }
+        }
+
+        $deploymentPayload = @{
+            displayName = $ReportName
+            description = "Report deployed from PBIP: $ReportName"
+            definition = @{ parts = $parts }
         }
         
         # Add semantic model binding if provided
@@ -589,7 +615,7 @@ function Deploy-Report {
             Write-Host "Binding report to semantic model ID: $SemanticModelId"
         }
         
-        $deploymentPayloadJson = $deploymentPayload | ConvertTo-Json -Depth 10
+        $deploymentPayloadJson = $deploymentPayload | ConvertTo-Json -Depth 50
         
         $deployUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
         
@@ -599,22 +625,20 @@ function Deploy-Report {
         }
         
         try {
-            # Prefer Fabric Items API for creation
-            $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
-            $createPayload = @{
-                "displayName" = $ReportName
-                "type" = "Report"
-                "definition" = (@($deploymentPayload | ConvertFrom-Json).definition)
-                "datasetId" = $SemanticModelId
-            } | ConvertTo-Json -Depth 20
-
-            try {
-                $response = Invoke-RestMethod -Uri $createUrl -Method Post -Body $createPayload -Headers $headers
-            } catch {
-                Write-Warning "Items API create failed, falling back to reports endpoint: $($_.Exception.Message)"
-                $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayloadJson -Headers $headers
+            if (-not $SemanticModelId) {
+                # Try to resolve dataset id by name
+                Write-Warning "SemanticModelId not provided; resolving by report/semantic model name..."
+                $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/semanticModels"
+                $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
+                $existingModel = $listResponse.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
+                if ($existingModel) { $SemanticModelId = $existingModel.id }
+            }
+            if (-not $SemanticModelId) {
+                throw "Dataset (SemanticModel) id is missing and could not be resolved."
             }
 
+            # Prefer dedicated reports endpoint for creation
+            $response = Invoke-RestMethod -Uri $deployUrl -Method Post -Body $deploymentPayloadJson -Headers $headers
             Write-Host "✓ Report deployed successfully"
             Write-Host "Report ID: $($response.id)"
             return $true
@@ -674,7 +698,24 @@ function Deploy-Report {
                 }
             } else {
                 Write-Error "Report creation failed. Status: $statusCode Body: $errBody"
-                throw $_
+                # Fallback: Try Items API create explicitly if dedicated endpoint failed for non-409
+                try {
+                    $createUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/items"
+                    $createPayloadObj = @{
+                        displayName = $ReportName
+                        type = "Report"
+                        definition = (@($deploymentPayload | ConvertFrom-Json).definition)
+                        datasetId = $SemanticModelId
+                    }
+                    if (-not $SemanticModelId) { $createPayloadObj.Remove('datasetId') }
+                    $createPayload = $createPayloadObj | ConvertTo-Json -Depth 20
+                    $response2 = Invoke-RestMethod -Uri $createUrl -Method Post -Body $createPayload -Headers $headers
+                    Write-Host "✓ Report deployed via Items API"
+                    return $true
+                } catch {
+                    Write-Error "Report creation failed. Status: $statusCode Body: $errBody"
+                    throw $_
+                }
             }
         }
         
