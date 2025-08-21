@@ -697,7 +697,7 @@ function Deploy-Report {
                 try {
                     $listUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports"
                     $listResponse = Invoke-RestMethod -Uri $listUrl -Method Get -Headers $headers
-                    $existingReport = $listResponse.value | Where-Object { $_.displayName -eq $ReportName }
+                    $existingReport = $listResponse.value | Where-Object { $_.displayName -eq $ReportName } | Select-Object -First 1
                     
                     if ($existingReport) {
                         Write-Host "Found existing report with ID: $($existingReport.id)"
@@ -706,16 +706,8 @@ function Deploy-Report {
                         $updateUrl = "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/reports/$($existingReport.id)/updateDefinition"
                         
                         $updatePayload = @{
-                            "definition" = @{
-                                "parts" = @(
-                                    @{
-                                        "path" = "report.json"
-                                        "payload" = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($reportDefinition))
-                                        "payloadType" = "InlineBase64"
-                                    }
-                                )
-                            }
-                        } | ConvertTo-Json -Depth 10
+                            definition = @{ parts = $parts }
+                        } | ConvertTo-Json -Depth 50
                         
                         try {
                             $updateResponse = Invoke-RestMethod -Uri $updateUrl -Method Post -Body $updatePayload -Headers $headers
